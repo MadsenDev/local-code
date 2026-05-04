@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from local_code.tools import resolve_path, replace_in_file, write_file, read_file, insert_after
+from local_code.tools import resolve_path, replace_in_file, replace_lines, write_file, read_file, insert_after
 
 
 class TestResolvePath:
@@ -55,3 +55,17 @@ class TestFileOps:
         assert "Inserted" in result
         content = read_file(str(tmp_path), "f.py", 1, 10)
         assert "inserted" in content
+
+    def test_replace_lines(self, tmp_path):
+        write_file(str(tmp_path), "f.py", "a = 1\nb = 2\nc = 3\n")
+        result = replace_lines(str(tmp_path), "f.py", 2, 2, "b = 99\n")
+        assert "Replaced" in result
+        content = read_file(str(tmp_path), "f.py", 1, 10)
+        assert "b = 99" in content
+        assert "a = 1" in content
+        assert "c = 3" in content
+
+    def test_replace_lines_out_of_bounds(self, tmp_path):
+        write_file(str(tmp_path), "f.py", "a = 1\n")
+        result = replace_lines(str(tmp_path), "f.py", 5, 10, "x\n")
+        assert "out of bounds" in result

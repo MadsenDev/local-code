@@ -36,6 +36,7 @@ from .tools import (
     list_files,
     read_file,
     replace_in_file,
+    replace_lines,
     repo_overview,
     resolve_path,
     run_subprocess,
@@ -171,6 +172,7 @@ class LocalCodeAgent:
             - read_file: {{"path":"file path","start":1,"end":200}}
             - run_command: {{"command":"shell command","timeout":30}}
             - write_file: {{"path":"file path","content":"full file content"}}
+            - replace_lines: {{"path":"file path","start":10,"end":15,"content":"replacement lines"}}  ← preferred for surgical edits; read the file first to get line numbers
             - replace_in_file: {{"path":"file path","old":"exact old text","new":"replacement text","count":1}}
             - insert_after: {{"path":"file path","anchor":"exact anchor text","content":"text to insert","occurrence":1}}
             - final: {{"summary":"...","findings":[...],"files_read":[...],"files_changed":[...],"diff_summary":"...","commands_run":[...],"tests_run":[...],"risks":[...],"needs_approval":false,"plan":[...]}}
@@ -294,7 +296,7 @@ class LocalCodeAgent:
                     "output": output,
                 }
                 return f"exit_code={code}\n{output}"
-            if tool in {"write_file", "replace_in_file", "insert_after"} and contract.get("edit_policy") != "execute":
+            if tool in {"write_file", "replace_in_file", "replace_lines", "insert_after"} and contract.get("edit_policy") != "execute":
                 return f"Edit blocked by edit_policy={contract.get('edit_policy')}"
             if tool == "write_file":
                 target = str(resolve_path(self.workdir, args["path"]))
@@ -314,6 +316,17 @@ class LocalCodeAgent:
                 before = self._read_text_for_diff(target)
                 tracker["files_changed"].add(target)
                 result = replace_in_file(self.workdir, args["path"], args["old"], args["new"], int(args.get("count", 1)))
+                after = self._read_text_for_diff(target)
+                self.last_tool_display = self.edit_display(target, before, after)
+                return result
+            if tool == "replace_lines":
+                target = str(resolve_path(self.workdir, args["path"]))
+                allowed, reason = self.allow_edit(target)
+                if not allowed:
+                    return reason
+                before = self._read_text_for_diff(target)
+                tracker["files_changed"].add(target)
+                result = replace_lines(self.workdir, args["path"], args["start"], args["end"], args.get("content", ""))
                 after = self._read_text_for_diff(target)
                 self.last_tool_display = self.edit_display(target, before, after)
                 return result
@@ -479,6 +492,19 @@ class LocalCodeAgent:
                 report["files_changed"] = report["files_changed"] or sorted(tracker["files_changed"])
                 if contract.get("edit_policy") in {"plan", "propose"}:
                     report["needs_approval"] = True
+                if contract.get("edit_policy") == "execute" and report["files_changed"]:
+                    _, diff_stat = run_subprocess("git diff HEAD --stat", cwd=self.workdir, timeout=10)
+                    if diff_stat.strip():
+                        report["diff_summary"] = report["diff_summary"] or diff_stat.strip()
+                        self.transcript_print("diff --stat", [diff_stat.strip()[:220]], color=UI.CYAN)
+                    _TEST_KEYWORDS = ("pytest", "npm test", "yarn test", "pnpm test", "jest", "vitest", "cargo test", "go test", "rspec")
+                    test_cmds = [c for c in (contract.get("commands_of_interest") or []) if any(t in c for t in _TEST_KEYWORDS)]
+                    if test_cmds and not report["tests_run"]:
+                        cmd = test_cmds[0]
+                        self.transcript_print("Running tests", [cmd], color=UI.CYAN)
+                        code, test_out = run_subprocess(cmd, cwd=self.workdir, timeout=60)
+                        report["tests_run"] = [f"{cmd}:\n{test_out[:1000]}"]
+                        self.transcript_print("Test results", [test_out[:220]], color=UI.GREEN if code == 0 else UI.RED)
                 self.transcript_print("Finished backend report", [summarize_text(report.get("summary", "Backend finished."), 220)], color=UI.GREEN)
                 return report
 

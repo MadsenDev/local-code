@@ -173,6 +173,23 @@ def replace_in_file(workdir, path, old, new, count=1):
     return f"Replaced {actual} occurrence(s) in {target}"
 
 
+def replace_lines(workdir, path, start, end, new_content):
+    target = resolve_path(workdir, path)
+    if not target.exists():
+        return f"File not found: {target}"
+    lines = target.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
+    n = len(lines)
+    start, end = int(start), int(end)
+    if start < 1 or start > n or end < start or end > n:
+        return f"Line range {start}-{end} out of bounds (file has {n} lines)."
+    if new_content and not new_content.endswith("\n"):
+        new_content += "\n"
+    replacement = new_content.splitlines(keepends=True) if new_content else []
+    updated = lines[: start - 1] + replacement + lines[end:]
+    target.write_text("".join(updated), encoding="utf-8")
+    return f"Replaced lines {start}-{end} ({end - start + 1} → {len(replacement)} lines) in {target}"
+
+
 def insert_after(workdir, path, anchor, content, occurrence=1):
     target = resolve_path(workdir, path)
     if not target.exists():
