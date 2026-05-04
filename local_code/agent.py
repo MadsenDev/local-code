@@ -28,7 +28,7 @@ from .contracts import (
     unwrap_frontend_reply_text,
 )
 from .memory import append_run_log, ensure_memory_files, load_repo_memory
-from .models import ollama_chat
+from .models import ollama_chat, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tools import (
     git_context,
@@ -173,7 +173,7 @@ class LocalCodeAgent:
             - write_file: {{"path":"file path","content":"full file content"}}
             - replace_in_file: {{"path":"file path","old":"exact old text","new":"replacement text","count":1}}
             - insert_after: {{"path":"file path","anchor":"exact anchor text","content":"text to insert","occurrence":1}}
-            - final: {{"message":"json report string"}}
+            - final: {{"summary":"...","findings":[...],"files_read":[...],"files_changed":[...],"diff_summary":"...","commands_run":[...],"tests_run":[...],"risks":[...],"needs_approval":false,"plan":[...]}}
             """
         ).strip()
 
@@ -467,7 +467,11 @@ class LocalCodeAgent:
             messages.append({"role": "assistant", "content": json.dumps(action)})
 
             if tool == "final":
-                report = normalize_backend_report(args.get("message", ""), fallback_message="Backend finished without a detailed report.")
+                message = args.get("message", "")
+                if isinstance(message, dict) or (isinstance(message, str) and message.strip().startswith("{")):
+                    report = normalize_backend_report(message, fallback_message="Backend finished without a detailed report.")
+                else:
+                    report = normalize_backend_report(args, fallback_message="Backend finished without a detailed report.")
                 report["commands_run"] = report["commands_run"] or tracker["commands_run"]
                 report["files_read"] = report["files_read"] or sorted(tracker["files_read"])
                 report["files_changed"] = report["files_changed"] or sorted(tracker["files_changed"])
@@ -546,7 +550,7 @@ class LocalCodeAgent:
                     'Use {"tool":"search_files","args":{"query":"sqlite|foreign key|schema|migration|account|connection|onboarding|testConnection","path":"src"}}.'
                 )
             else:
-                tool_hint = 'Use a targeted read/search tool, or {"tool":"final","args":{"message":"..."} } if you already have the finding.'
+                tool_hint = 'Use a targeted read/search tool, or {"tool":"final","args":{"summary":"...","findings":[...]}} if you already have the finding.'
         else:
             tool_hint = 'Use a single JSON tool call, then wait for the result.'
         return (
@@ -585,6 +589,8 @@ class LocalPartner:
         self.latest_plan = None
         self.last_report = None
         self.last_status = None
+        self.on_token = None
+        self.last_streamed = False
         ensure_memory_files(self.workdir)
         self.executor = LocalCodeAgent(
             model=self.backend_model,
@@ -620,6 +626,24 @@ class LocalPartner:
 
     def chat(self, model, messages):
         return ollama_chat(self.ollama, model, messages)
+
+    def _chat_streaming(self, model, messages):
+        """Stream a response via on_token callbacks; return full accumulated text."""
+        chunks = []
+        first = True
+        for chunk in ollama_stream(self.ollama, model, messages):
+            if first:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                first = False
+            self.on_token(chunk)
+            chunks.append(chunk)
+        full = "".join(chunks)
+        if full and not full.endswith("\n"):
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+        self.last_streamed = True
+        return full.strip()
 
     def frontend_system_prompt(self):
         return textwrap.dedent(
@@ -749,14 +773,17 @@ class LocalPartner:
         messages.extend(self.history)
         messages.append({"role": "user", "content": original_prompt})
         messages.append({"role": "user", "content": (("Context to preserve:\n" + frontend_message + "\n\n") if frontend_message else "") + "Backend report:\n" + json.dumps(backend_report, ensure_ascii=False, indent=2)})
-        spinner = Spinner(self.ui, self.ui.style("composing", UI.DIM))
-        spinner.start()
         started = time.monotonic()
-        reply = self.chat(self.frontend_model, messages)
+        if self.on_token:
+            reply = self._chat_streaming(self.frontend_model, messages)
+        else:
+            spinner = Spinner(self.ui, self.ui.style("composing", UI.DIM))
+            spinner.start()
+            reply = self.chat(self.frontend_model, messages).strip()
+            spinner.stop()
         elapsed = time.monotonic() - started
-        spinner.stop()
         self.trace_print(self.ui.style("Compose", UI.MAGENTA, UI.BOLD) + " frontend answer " + self.ui.style(f"({elapsed:.1f}s)", UI.DIM))
-        return reply.strip()
+        return reply
 
     def frontend_summarize_proposal(self, original_prompt, contract, backend_report, frontend_message=""):
         messages = [{"role": "system", "content": textwrap.dedent(
@@ -770,6 +797,8 @@ class LocalPartner:
         messages.extend(self.history)
         messages.append({"role": "user", "content": original_prompt})
         messages.append({"role": "user", "content": (("Context to preserve:\n" + frontend_message + "\n\n") if frontend_message else "") + "Contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2) + "\n\nBackend report:\n" + json.dumps(backend_report, ensure_ascii=False, indent=2)})
+        if self.on_token:
+            return self._chat_streaming(self.frontend_model, messages)
         spinner = Spinner(self.ui, self.ui.style("preparing proposal", UI.DIM))
         spinner.start()
         reply = self.chat(self.frontend_model, messages).strip()

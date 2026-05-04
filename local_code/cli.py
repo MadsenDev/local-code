@@ -258,12 +258,14 @@ def read_prompt(session, pastes):
 
 
 def print_reply(agent, reply):
-    print()
-    agent.ui.print_markdown(reply)
+    if not agent.last_streamed:
+        print()
+        agent.ui.print_markdown(reply)
     card = render_final_card(agent)
     if card:
         print(card)
     print()
+    agent.last_streamed = False
 
 
 def run_with_temporary_mode(agent, mode, prompt, planning=False):
@@ -350,6 +352,8 @@ def interactive_loop(agent):
     print(render_header(agent))
     print(agent.ui.style("  /help for commands · /status for details", UI.DIM))
     print()
+    if agent.ui.enabled:
+        agent.on_token = lambda chunk: (sys.stdout.write(chunk), sys.stdout.flush())
     pastes = {}
     session = make_prompt_session(pastes)
     while True:
