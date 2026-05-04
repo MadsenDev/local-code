@@ -212,6 +212,13 @@ class Spinner:
         if final_text:
             print(final_text, file=sys.stderr, flush=True)
 
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, *_):
+        self.stop()
+
 
 def clip(text, limit=MAX_OUTPUT_CHARS):
     text = text or ""

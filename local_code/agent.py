@@ -27,7 +27,7 @@ from .contracts import (
     resolve_repo_file_hints,
     unwrap_frontend_reply_text,
 )
-from .memory import append_run_log, ensure_memory_files, load_repo_memory
+from .memory import append_run_log, ensure_memory_files, load_chat_history, load_repo_memory, save_chat_history
 from .models import ollama_chat, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tools import (
@@ -226,10 +226,8 @@ class LocalCodeAgent:
                 + command_section,
             },
         ]
-        spinner = Spinner(self.ui, self.ui.style("analyzing", UI.DIM))
-        spinner.start()
-        raw = self.chat(messages)
-        spinner.stop()
+        with Spinner(self.ui, self.ui.style("analyzing", UI.DIM)):
+            raw = self.chat(messages)
         report = normalize_backend_report(raw, fallback_message="Backend direct analysis failed.")
         if not report["files_read"]:
             report["files_read"] = [str(resolve_path(self.workdir, p)) for p in (contract.get("files_of_interest") or [])[:3]]
@@ -244,17 +242,23 @@ class LocalCodeAgent:
 
     def parse_action(self, text):
         text = text.strip()
-        candidates = [text]
         fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
         if fence:
-            candidates.append(fence.group(1))
-        brace = re.search(r"(\{.*\})", text, re.S)
-        if brace:
-            candidates.append(brace.group(1))
-        for candidate in candidates:
-            data = load_json_layers(candidate)
+            data = load_json_layers(fence.group(1))
             if isinstance(data, dict) and "tool" in data and "args" in data:
                 return data
+        decoder = json.JSONDecoder()
+        for i, ch in enumerate(text):
+            if ch == "{":
+                try:
+                    obj, _ = decoder.raw_decode(text, i)
+                    if isinstance(obj, dict) and "tool" in obj and "args" in obj:
+                        return obj
+                except json.JSONDecodeError:
+                    continue
+        data = load_json_layers(text)
+        if isinstance(data, dict) and "tool" in data and "args" in data:
+            return data
         raise ValueError(f"Backend did not return a valid tool JSON object:\n{text}")
 
     def tool_result(self, tool, args, contract, tracker):
@@ -418,12 +422,10 @@ class LocalCodeAgent:
             spinner_label = f"step {step}/{self.max_steps}"
             if intent and step == 1:
                 spinner_label += f"  ·  {intent}"
-            spinner = Spinner(self.ui, self.ui.style(spinner_label, UI.DIM))
-            spinner.start()
-            chat_started = time.monotonic()
-            raw = self.chat(messages)
-            chat_elapsed = time.monotonic() - chat_started
-            spinner.stop()
+            with Spinner(self.ui, self.ui.style(spinner_label, UI.DIM)):
+                chat_started = time.monotonic()
+                raw = self.chat(messages)
+                chat_elapsed = time.monotonic() - chat_started
             try:
                 action = self.parse_action(raw)
             except Exception as exc:  # noqa: BLE001
@@ -584,7 +586,6 @@ class LocalPartner:
         self.show_raw_actions = show_raw_actions
         self.mode = mode
         self.ui = UI()
-        self.history = []
         self.pending_plan = None
         self.latest_plan = None
         self.last_report = None
@@ -592,6 +593,7 @@ class LocalPartner:
         self.on_token = None
         self.last_streamed = False
         ensure_memory_files(self.workdir)
+        self.history = load_chat_history(self.workdir)
         self.executor = LocalCodeAgent(
             model=self.backend_model,
             ollama=self.ollama,
@@ -606,6 +608,7 @@ class LocalPartner:
     def _prune_history(self):
         if len(self.history) > MAX_HISTORY_MESSAGES:
             self.history = self.history[-MAX_HISTORY_MESSAGES:]
+        save_chat_history(self.workdir, self.history)
 
     def sync_executor(self):
         self.executor.model = self.backend_model
@@ -692,19 +695,24 @@ class LocalPartner:
 
     def parse_frontend_action(self, text):
         text = text.strip()
-        candidates = [text]
         fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
         if fence:
-            candidates.append(fence.group(1))
-        brace = re.search(r"(\{.*\})", text, re.S)
-        if brace:
-            candidates.append(brace.group(1))
-        for candidate in candidates:
-            data = load_json_layers(candidate)
+            data = load_json_layers(fence.group(1))
             if isinstance(data, dict) and data.get("mode") in {"reply", "delegate"}:
                 if data.get("mode") == "reply" and isinstance(data.get("message"), str):
                     data["message"] = unwrap_frontend_reply_text(data["message"])
                 return data
+        decoder = json.JSONDecoder()
+        for i, ch in enumerate(text):
+            if ch == "{":
+                try:
+                    obj, _ = decoder.raw_decode(text, i)
+                    if isinstance(obj, dict) and obj.get("mode") in {"reply", "delegate"}:
+                        if obj.get("mode") == "reply" and isinstance(obj.get("message"), str):
+                            obj["message"] = unwrap_frontend_reply_text(obj["message"])
+                        return obj
+                except json.JSONDecodeError:
+                    continue
         if text:
             return {"mode": "reply", "message": unwrap_frontend_reply_text(text)}
         raise ValueError(f"Frontend did not return a valid JSON action:\n{text}")
@@ -737,12 +745,10 @@ class LocalPartner:
         elif self.mode == "chat":
             messages.append({"role": "user", "content": "Chat mode is active. Do not delegate; answer conversationally."})
 
-        spinner = Spinner(self.ui, self.ui.style("thinking", UI.DIM))
-        spinner.start()
-        started = time.monotonic()
-        raw = self.chat(self.frontend_model, messages)
-        elapsed = time.monotonic() - started
-        spinner.stop()
+        with Spinner(self.ui, self.ui.style("thinking", UI.DIM)):
+            started = time.monotonic()
+            raw = self.chat(self.frontend_model, messages)
+            elapsed = time.monotonic() - started
         action = self.parse_frontend_action(raw)
         if self.show_raw_actions and self.verbosity == "debug":
             self.trace_print("raw action: " + json.dumps(action, ensure_ascii=False))
@@ -777,10 +783,8 @@ class LocalPartner:
         if self.on_token:
             reply = self._chat_streaming(self.frontend_model, messages)
         else:
-            spinner = Spinner(self.ui, self.ui.style("composing", UI.DIM))
-            spinner.start()
-            reply = self.chat(self.frontend_model, messages).strip()
-            spinner.stop()
+            with Spinner(self.ui, self.ui.style("composing", UI.DIM)):
+                reply = self.chat(self.frontend_model, messages).strip()
         elapsed = time.monotonic() - started
         self.trace_print(self.ui.style("Compose", UI.MAGENTA, UI.BOLD) + " frontend answer " + self.ui.style(f"({elapsed:.1f}s)", UI.DIM))
         return reply
@@ -799,10 +803,8 @@ class LocalPartner:
         messages.append({"role": "user", "content": (("Context to preserve:\n" + frontend_message + "\n\n") if frontend_message else "") + "Contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2) + "\n\nBackend report:\n" + json.dumps(backend_report, ensure_ascii=False, indent=2)})
         if self.on_token:
             return self._chat_streaming(self.frontend_model, messages)
-        spinner = Spinner(self.ui, self.ui.style("preparing proposal", UI.DIM))
-        spinner.start()
-        reply = self.chat(self.frontend_model, messages).strip()
-        spinner.stop()
+        with Spinner(self.ui, self.ui.style("preparing proposal", UI.DIM)):
+            reply = self.chat(self.frontend_model, messages).strip()
         return reply
 
     def log_run(self, user_prompt, result, contract=None, report=None, status="completed"):
@@ -835,6 +837,7 @@ class LocalPartner:
         self.pending_plan = None
         self.history.append({"role": "user", "content": "Apply the approved plan."})
         self.history.append({"role": "assistant", "content": reply})
+        save_chat_history(self.workdir, self.history)
         self.log_run("/apply", reply, contract=contract, report=report)
         return reply
 

@@ -17,6 +17,7 @@ from .config import (
     HELP_TEXT,
     MAX_TOOL_STEPS,
 )
+from .memory import clear_chat_history, save_chat_history
 from .tools import git_summary, list_files, read_file, resolve_path
 from .ui import UI
 
@@ -268,6 +269,13 @@ def print_reply(agent, reply):
     agent.last_streamed = False
 
 
+def _handle_cancelled(agent):
+    sys.stderr.write("\r\033[2K")
+    sys.stderr.flush()
+    print("\nCancelled.", flush=True)
+    agent.last_streamed = False
+
+
 def run_with_temporary_mode(agent, mode, prompt, planning=False):
     previous = agent.mode
     agent.mode = mode
@@ -360,6 +368,7 @@ def interactive_loop(agent):
         try:
             prompt = read_prompt(session, pastes)
         except (EOFError, KeyboardInterrupt):
+            save_chat_history(agent.workdir, agent.history)
             print()
             return 0
 
@@ -379,6 +388,7 @@ def interactive_loop(agent):
         if prompt == "/clear":
             agent.history.clear()
             agent.pending_plan = None
+            clear_chat_history(agent.workdir)
             print("History cleared.")
             continue
         if prompt.startswith("/mode "):
@@ -475,6 +485,9 @@ def interactive_loop(agent):
                 continue
             try:
                 reply = agent.run_turn(text)
+            except KeyboardInterrupt:
+                _handle_cancelled(agent)
+                continue
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="ignore")
                 print(f"HTTP error: {exc}\n{detail}")
@@ -491,6 +504,9 @@ def interactive_loop(agent):
             text = prompt.split(None, 1)[1].strip()
             try:
                 reply = agent.run_readonly_turn(text)
+            except KeyboardInterrupt:
+                _handle_cancelled(agent)
+                continue
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="ignore")
                 print(f"HTTP error: {exc}\n{detail}")
@@ -507,6 +523,9 @@ def interactive_loop(agent):
             text = prompt.split(None, 1)[1].strip()
             try:
                 reply = agent.run_turn(text, planning=True)
+            except KeyboardInterrupt:
+                _handle_cancelled(agent)
+                continue
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="ignore")
                 print(f"HTTP error: {exc}\n{detail}")
@@ -523,6 +542,9 @@ def interactive_loop(agent):
             text = prompt.split(None, 1)[1].strip()
             try:
                 reply = run_with_temporary_mode(agent, "agent", text)
+            except KeyboardInterrupt:
+                _handle_cancelled(agent)
+                continue
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="ignore")
                 print(f"HTTP error: {exc}\n{detail}")
@@ -539,6 +561,9 @@ def interactive_loop(agent):
             text = prompt.split(None, 1)[1].strip()
             try:
                 reply = run_with_temporary_mode(agent, "agent", text)
+            except KeyboardInterrupt:
+                _handle_cancelled(agent)
+                continue
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="ignore")
                 print(f"HTTP error: {exc}\n{detail}")
@@ -566,6 +591,9 @@ def interactive_loop(agent):
                 agent.pending_plan = dict(agent.latest_plan)
             try:
                 reply = agent.apply_pending_plan()
+            except KeyboardInterrupt:
+                _handle_cancelled(agent)
+                continue
             except urllib.error.HTTPError as exc:
                 detail = exc.read().decode("utf-8", errors="ignore")
                 print(f"HTTP error: {exc}\n{detail}")
@@ -591,6 +619,9 @@ def interactive_loop(agent):
         prompt = expand_at_references(prompt, agent.workdir, agent.ui)
         try:
             reply = agent.run_turn(prompt)
+        except KeyboardInterrupt:
+            _handle_cancelled(agent)
+            continue
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="ignore")
             print(f"HTTP error: {exc}\n{detail}")

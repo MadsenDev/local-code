@@ -2,7 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from .config import MEMORY_DIR_NAME
+from .config import MAX_HISTORY_MESSAGES, MEMORY_DIR_NAME
 from .ui import clip
 
 
@@ -14,6 +14,7 @@ def memory_paths(workdir):
         "decisions": base / "decisions.md",
         "architecture": base / "architecture.md",
         "runs": base / "runs.jsonl",
+        "chat_history": base / "chat_history.jsonl",
         "gitignore": base / ".gitignore",
     }
 
@@ -107,5 +108,41 @@ def _trim_run_log(path, limit=500):
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)
         if len(lines) > limit:
             path.write_text("".join(lines[-limit:]), encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def load_chat_history(workdir):
+    path = memory_paths(workdir)["chat_history"]
+    if not path.exists():
+        return []
+    history = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+            if isinstance(msg, dict) and msg.get("role") in {"user", "assistant"} and isinstance(msg.get("content"), str):
+                history.append(msg)
+        except json.JSONDecodeError:
+            continue
+    return history[-MAX_HISTORY_MESSAGES:]
+
+
+def save_chat_history(workdir, history):
+    path = memory_paths(workdir)["chat_history"]
+    try:
+        with path.open("w", encoding="utf-8") as fh:
+            for msg in history:
+                fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def clear_chat_history(workdir):
+    path = memory_paths(workdir)["chat_history"]
+    try:
+        path.write_text("", encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
