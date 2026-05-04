@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-code"
+version = "0.1.0"
+description = "Local AI coding partner backed by Ollama"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+ui = [
+    "prompt-toolkit>=3.0",
+    "rich>=13.0",
+]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+local-code = "local_code.cli:main"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
