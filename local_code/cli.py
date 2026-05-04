@@ -258,10 +258,28 @@ def read_prompt(session, pastes):
     return input("> ").strip()
 
 
+def _looks_like_diff(text):
+    return bool(text and ("--- " in text or "+++ " in text or text.lstrip().startswith("@@")))
+
+
 def print_reply(agent, reply):
     if not agent.last_streamed:
         print()
         agent.ui.print_markdown(reply)
+    report = getattr(agent, "last_report", None)
+    if report and report.get("needs_approval"):
+        plan = [s for s in (report.get("plan") or []) if s]
+        diff = (report.get("diff_summary") or "").strip()
+        if plan:
+            print()
+            print(agent.ui.style("  Planned changes:", agent.ui.BOLD))
+            for i, step in enumerate(plan, 1):
+                print(f"    {i}. {step}")
+        if diff and _looks_like_diff(diff):
+            print()
+            rendered = agent.ui.render_diff_lines(diff.splitlines())
+            for line in rendered:
+                print(line)
     card = render_final_card(agent)
     if card:
         print(card)

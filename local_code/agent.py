@@ -154,12 +154,13 @@ class LocalCodeAgent:
                 "commands_run": ["..."],
                 "files_read": ["..."],
                 "files_changed": ["..."],
-                "diff_summary": "what changed or would change",
+                "diff_summary": "unified diff of proposed changes (--- a/path, +++ b/path, @@ lines) for plan/propose mode; git diff --stat output for execute mode",
                 "tests_run": ["..."],
                 "risks": ["..."],
                 "needs_approval": true_or_false,
-                "plan": ["step 1", "step 2"]
+                "plan": ["concrete step 1", "concrete step 2"]
               }}
+            - In plan or propose mode: populate diff_summary with a real unified diff showing exactly what lines would change. Read each file first, then produce --- / +++ / @@ hunks. Populate plan with one entry per file change.
             - Return exactly one JSON object using the tool schema and no prose outside it.
 
             Tool schema:
