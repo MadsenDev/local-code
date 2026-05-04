@@ -2,9 +2,42 @@ import json
 import re
 import shlex
 import subprocess
+import urllib.request
+from html.parser import HTMLParser
 from pathlib import Path
 
 from .ui import clip
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self._skip = False
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag in ("script", "style", "head"):
+            self._skip = True
+
+    def handle_endtag(self, tag):
+        if tag in ("script", "style", "head"):
+            self._skip = False
+
+    def handle_data(self, data):
+        if not self._skip and data.strip():
+            self.parts.append(data)
+
+
+def fetch_url(url, timeout=15):
+    req = urllib.request.Request(url, headers={"User-Agent": "local-code/0.2"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        content_type = resp.headers.get("Content-Type", "")
+        raw = resp.read().decode("utf-8", errors="replace")
+    if "html" in content_type.lower():
+        extractor = _TextExtractor()
+        extractor.feed(raw)
+        return clip("\n".join(extractor.parts))
+    return clip(raw)
 
 
 def run_subprocess(cmd, cwd=None, timeout=30):

@@ -56,3 +56,7 @@ BLOCKED_COMMAND_PATTERNS = [
 ]
 
 SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+READ_FILE_DEFAULT_END = 500
+
+TEST_COMMAND_PATTERNS = ("pytest", "npm test", "yarn test", "pnpm test", "jest", "vitest", "cargo test", "go test", "rspec")

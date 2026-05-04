@@ -16,6 +16,8 @@ from .config import (
     MAX_HISTORY_MESSAGES,
     MAX_TOOL_STEPS,
     PROMPT_YES_RE,
+    READ_FILE_DEFAULT_END,
+    TEST_COMMAND_PATTERNS,
 )
 from .contracts import (
     has_database_context,
@@ -31,6 +33,7 @@ from .memory import append_run_log, ensure_memory_files, load_chat_history, load
 from .models import ollama_chat, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tools import (
+    fetch_url,
     git_context,
     insert_after,
     list_files,
@@ -167,10 +170,11 @@ class LocalCodeAgent:
             {{"tool":"TOOL_NAME","args":{{...}}}}
 
             Allowed tools:
+            - fetch_url: {{"url":"https://..."}}
             - repo_overview: {{}}
             - list_files: {{"path":"optional path"}}
             - search_files: {{"query":"text or regex","path":"optional path"}}
-            - read_file: {{"path":"file path","start":1,"end":200}}
+            - read_file: {{"path":"file path","start":1,"end":500}}
             - run_command: {{"command":"shell command","timeout":30}}
             - write_file: {{"path":"file path","content":"full file content"}}
             - replace_lines: {{"path":"file path","start":10,"end":15,"content":"replacement lines"}}  ← preferred for surgical edits; read the file first to get line numbers
@@ -267,6 +271,8 @@ class LocalCodeAgent:
     def tool_result(self, tool, args, contract, tracker):
         self.last_tool_display = None
         try:
+            if tool == "fetch_url":
+                return fetch_url(args["url"])
             if tool == "repo_overview":
                 return repo_overview(self.workdir)
             if tool == "list_files":
@@ -276,7 +282,7 @@ class LocalCodeAgent:
             if tool == "read_file":
                 path = args["path"]
                 tracker["files_read"].add(str(resolve_path(self.workdir, path)))
-                result = read_file(self.workdir, path, args.get("start", 1), args.get("end", 200))
+                result = read_file(self.workdir, path, args.get("start", 1), args.get("end", READ_FILE_DEFAULT_END))
                 self.last_tool_display = {
                     "kind": "read",
                     "path": path,
@@ -498,8 +504,7 @@ class LocalCodeAgent:
                     if diff_stat.strip():
                         report["diff_summary"] = report["diff_summary"] or diff_stat.strip()
                         self.transcript_print("diff --stat", [diff_stat.strip()[:220]], color=UI.CYAN)
-                    _TEST_KEYWORDS = ("pytest", "npm test", "yarn test", "pnpm test", "jest", "vitest", "cargo test", "go test", "rspec")
-                    test_cmds = [c for c in (contract.get("commands_of_interest") or []) if any(t in c for t in _TEST_KEYWORDS)]
+                    test_cmds = [c for c in (contract.get("commands_of_interest") or []) if any(t in c for t in TEST_COMMAND_PATTERNS)]
                     if test_cmds and not report["tests_run"]:
                         cmd = test_cmds[0]
                         self.transcript_print("Running tests", [cmd], color=UI.CYAN)
@@ -675,6 +680,33 @@ class LocalPartner:
         self.last_streamed = True
         return full.strip()
 
+    def _stream_frontend_turn(self, model, messages):
+        """Stream frontend turn: text replies go to on_token, delegation JSON is buffered silently."""
+        chunks = []
+        decided = False
+        is_text = False
+        for chunk in ollama_stream(self.ollama, model, messages):
+            chunks.append(chunk)
+            if not decided:
+                so_far = "".join(chunks).lstrip()
+                if so_far:
+                    is_text = not so_far.startswith("{")
+                    decided = True
+                    if is_text:
+                        sys.stdout.write("\n")
+                        sys.stdout.flush()
+                        for c in chunks:
+                            self.on_token(c)
+            elif is_text:
+                self.on_token(chunk)
+        full = "".join(chunks)
+        if is_text:
+            if full and not full.endswith("\n"):
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+            self.last_streamed = True
+        return full.strip()
+
     def frontend_system_prompt(self):
         return textwrap.dedent(
             f"""\
@@ -699,14 +731,11 @@ class LocalPartner:
             - When delegation is useful, produce a strict contract for the backend.
             - For edit requests in hybrid mode, prefer propose over execute. The user should review the proposal before edits happen.
 
-            Return exactly one JSON object.
-            Reply directly:
-            {{"mode":"reply","message":"..."}}
-
-            Or delegate with a structured contract:
+            For direct answers: respond with plain natural-language text only.
+            To delegate to the backend: respond with ONLY this JSON object (no other text before or after):
             {{
               "mode":"delegate",
-              "message":"brief user-facing explanation",
+              "message":"brief explanation shown to user while backend works",
               "contract": {{
                 "goal":"...",
                 "scope":["src","electron"],
@@ -772,10 +801,13 @@ class LocalPartner:
         elif self.mode == "chat":
             messages.append({"role": "user", "content": "Chat mode is active. Do not delegate; answer conversationally."})
 
-        with Spinner(self.ui, self.ui.style("thinking", UI.DIM)):
-            started = time.monotonic()
-            raw = self.chat(self.frontend_model, messages)
-            elapsed = time.monotonic() - started
+        started = time.monotonic()
+        if self.on_token:
+            raw = self._stream_frontend_turn(self.frontend_model, messages)
+        else:
+            with Spinner(self.ui, self.ui.style("thinking", UI.DIM)):
+                raw = self.chat(self.frontend_model, messages)
+        elapsed = time.monotonic() - started
         action = self.parse_frontend_action(raw)
         if self.show_raw_actions and self.verbosity == "debug":
             self.trace_print("raw action: " + json.dumps(action, ensure_ascii=False))
