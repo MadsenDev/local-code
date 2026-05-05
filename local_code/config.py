@@ -43,6 +43,7 @@ HELP_TEXT = """Commands:
 /files                        Pick a repo file with fzf
 @path                         Reference a file or folder in any prompt
 /apply                        Apply the latest approved or pending plan
+/undo                         Revert files changed by the last execute run
 /status                       Show current settings
 /quit                         Exit
 """

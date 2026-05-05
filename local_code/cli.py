@@ -602,11 +602,9 @@ def interactive_loop(agent):
                 print(agent.ui.transcript_item("Selected file", [selected], color=UI.CYAN))
             continue
         if prompt == "/apply":
-            if not agent.pending_plan and not agent.latest_plan:
-                print("No pending or stored plan to apply.")
+            if not agent.pending_plan:
+                print("No active pending proposal to apply.")
                 continue
-            if not agent.pending_plan and agent.latest_plan:
-                agent.pending_plan = dict(agent.latest_plan)
             try:
                 reply = agent.apply_pending_plan()
             except KeyboardInterrupt:

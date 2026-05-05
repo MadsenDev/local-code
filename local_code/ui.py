@@ -82,7 +82,7 @@ class UI:
     def mode_label(self, mode):
         labels = {
             "chat": ("CHAT", "brainstorming only", self.GREEN),
-            "hybrid": ("PLAN", "inspect + propose", self.YELLOW),
+            "hybrid": ("HYBRID", "inspect + execute", self.YELLOW),
             "agent": ("AGENT", "execute with permissions", self.RED),
         }
         name, detail, color = labels.get(mode, (mode.upper(), "", self.CYAN))

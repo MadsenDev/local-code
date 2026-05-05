@@ -23,13 +23,14 @@ from .contracts import (
     has_database_context,
     has_pasted_context,
     infer_command_hints,
+    inspect_workdir_state,
     load_json_layers,
     normalize_backend_report,
     normalize_contract,
     resolve_repo_file_hints,
     unwrap_frontend_reply_text,
 )
-from .memory import append_run_log, ensure_memory_files, load_chat_history, load_repo_memory, save_chat_history
+from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
 from .models import ollama_chat, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tools import (
@@ -74,6 +75,8 @@ class LocalCodeAgent:
         self.last_backend_action = None
         self.last_backend_action_signature = None
         self.repeated_backend_action_count = 0
+        self.command_approval_cache = {}
+        self.command_prefix_approval_cache = {}
 
     def chat(self, messages):
         return ollama_chat(self.ollama, self.model, messages)
@@ -95,7 +98,7 @@ class LocalCodeAgent:
         if self.verbosity in {"normal", "debug"}:
             print(self.ui.transcript_item(title, lines or [], color=color), file=sys.stderr)
 
-    def allow_command(self, command, allowed_commands):
+    def allow_command(self, command, allowed_commands, approval_prefixes=None):
         if allowed_commands:
             for allowed in allowed_commands:
                 if command == allowed or command.startswith(allowed + " "):
@@ -107,7 +110,17 @@ class LocalCodeAgent:
         if self.command_permission == "deny":
             return False, "Command execution is disabled by permission mode."
         if self.command_permission == "ask":
+            for prefix, ok in self.command_prefix_approval_cache.items():
+                if command == prefix or command.startswith(prefix + " "):
+                    return ok, "Command not approved by user." if not ok else ""
+            if command in self.command_approval_cache:
+                ok = self.command_approval_cache[command]
+                return ok, "Command not approved by user." if not ok else ""
             ok = confirm_action("Command", command, "Verify or inspect the current task before continuing.", self.ui)
+            self.command_approval_cache[command] = ok
+            for prefix in approval_prefixes or []:
+                if command == prefix or command.startswith(prefix + " "):
+                    self.command_prefix_approval_cache[prefix] = ok
             return ok, "Command not approved by user." if not ok else ""
         return True, ""
 
@@ -291,11 +304,20 @@ class LocalCodeAgent:
                 return result
             if tool == "run_command":
                 command = args["command"]
-                allowed, reason = self.allow_command(command, contract.get("commands_allowed") or [])
+                allowed, reason = self.allow_command(
+                    command,
+                    contract.get("commands_allowed") or [],
+                    contract.get("approval_prefixes") or [],
+                )
                 if not allowed:
                     return reason
                 tracker["commands_run"].append(command)
-                code, output = run_subprocess(command, cwd=self.workdir, timeout=min(int(args.get("timeout", 30)), 120))
+                requested_timeout = int(args.get("timeout", 30))
+                if tool == "run_command" and contract.get("task_kind") == "bootstrap_new":
+                    timeout = min(requested_timeout, 300)
+                else:
+                    timeout = min(requested_timeout, 120)
+                code, output = run_subprocess(command, cwd=self.workdir, timeout=timeout)
                 self.last_tool_display = {
                     "kind": "command",
                     "command": command,
@@ -350,7 +372,8 @@ class LocalCodeAgent:
                 return result
             return f"Unknown tool: {tool}"
         except subprocess.TimeoutExpired:
-            return "Command timed out."
+            command = args.get("command", tool)
+            return f"Command timed out: {command}"
         except KeyError as exc:
             return f"Missing required argument: {exc}"
         except Exception as exc:  # noqa: BLE001
@@ -422,6 +445,8 @@ class LocalCodeAgent:
             print(self.ui.tool_line("Overview  repo structure", color=UI.CYAN), file=sys.stderr)
 
     def run_contract(self, contract, memory_text):
+        self.command_approval_cache = {}
+        self.command_prefix_approval_cache = {}
         if contract.get("edit_policy") in {"inspect", "plan", "propose"} and contract.get("files_of_interest"):
             return self.direct_report(contract, memory_text)
         messages = [{"role": "system", "content": self.system_prompt(contract, memory_text)}]
@@ -444,7 +469,32 @@ class LocalCodeAgent:
                 spinner_label += f"  ·  {intent}"
             with Spinner(self.ui, self.ui.style(spinner_label, UI.DIM)):
                 chat_started = time.monotonic()
-                raw = self.chat(messages)
+                try:
+                    raw = self.chat(messages)
+                except TimeoutError:
+                    if step == 1:
+                        try:
+                            raw = self.chat(messages)
+                        except TimeoutError:
+                            return normalize_backend_report(
+                                {
+                                    "summary": f"Backend model timed out while {spinner_label}.",
+                                    "commands_run": tracker["commands_run"],
+                                    "files_read": sorted(tracker["files_read"]),
+                                    "files_changed": sorted(tracker["files_changed"]),
+                                    "risks": ["Backend model timeout; task context was preserved for retry."],
+                                }
+                            )
+                    else:
+                        return normalize_backend_report(
+                            {
+                                "summary": f"Backend model timed out while {spinner_label}.",
+                                "commands_run": tracker["commands_run"],
+                                "files_read": sorted(tracker["files_read"]),
+                                "files_changed": sorted(tracker["files_changed"]),
+                                "risks": ["Backend model timeout; task context was preserved for retry."],
+                            }
+                        )
                 chat_elapsed = time.monotonic() - chat_started
             try:
                 action = self.parse_action(raw)
@@ -454,7 +504,7 @@ class LocalCodeAgent:
                 messages.append(
                     {
                         "role": "user",
-                        "content": self.invalid_action_hint(contract, step, exc, invalid_action_count),
+                        "content": self.invalid_action_hint(contract, step, exc, invalid_action_count, tracker),
                     }
                 )
                 if invalid_action_count >= 4:
@@ -511,6 +561,13 @@ class LocalCodeAgent:
                         code, test_out = run_subprocess(cmd, cwd=self.workdir, timeout=60)
                         report["tests_run"] = [f"{cmd}:\n{test_out[:1000]}"]
                         self.transcript_print("Test results", [test_out[:220]], color=UI.GREEN if code == 0 else UI.RED)
+                missing = self.verify_contract_outputs(contract)
+                if missing:
+                    report["summary"] = "Task ran but verification did not fully pass."
+                    report["risks"] = report.get("risks") or []
+                    report["risks"].append("Missing expected artifacts: " + ", ".join(missing))
+                elif contract.get("verification_checks") and contract.get("task_kind") == "bootstrap_new" and "verified" not in report["summary"].lower():
+                    report["summary"] = report["summary"].rstrip(".") + ". Verified expected project files."
                 self.transcript_print("Finished backend report", [summarize_text(report.get("summary", "Backend finished."), 220)], color=UI.GREEN)
                 return report
 
@@ -574,8 +631,14 @@ class LocalCodeAgent:
             normalized_args = str(args)
         return f"{tool}:{normalized_args}"
 
-    def invalid_action_hint(self, contract, step, error, invalid_action_count):
+    def invalid_action_hint(self, contract, step, error, invalid_action_count, tracker):
         database_context = has_database_context(json.dumps(contract))
+        last_result = []
+        if tracker["commands_run"]:
+            last_result.append("commands: " + ", ".join(tracker["commands_run"][-2:]))
+        if tracker["files_read"]:
+            last_result.append("files read: " + ", ".join(sorted(tracker["files_read"])[-2:]))
+        progress = " Previous progress: " + "; ".join(last_result) + "." if last_result else ""
         if database_context:
             if step <= 1 or invalid_action_count == 1:
                 tool_hint = 'Use {"tool":"repo_overview","args":{}}.'
@@ -589,8 +652,15 @@ class LocalCodeAgent:
             tool_hint = 'Use a single JSON tool call, then wait for the result.'
         return (
             "Your previous response was invalid. Return exactly one JSON object only. "
-            f"Error: {error}. {tool_hint}"
+            f"Error: {error}.{progress} {tool_hint}"
         )
+
+    def verify_contract_outputs(self, contract):
+        missing = []
+        for path in contract.get("target_paths") or []:
+            if not Path(self.workdir, path).exists():
+                missing.append(path)
+        return missing
 
 
 class LocalPartner:
@@ -624,6 +694,7 @@ class LocalPartner:
         self.last_status = None
         self.on_token = None
         self.last_streamed = False
+        self.backend_runs = 0
         ensure_memory_files(self.workdir)
         self.history = load_chat_history(self.workdir)
         self.executor = LocalCodeAgent(
@@ -724,12 +795,14 @@ class LocalPartner:
 
             Behavior:
             - In chat mode, do not delegate to the backend.
-            - In hybrid mode, discuss first and delegate when repo inspection or validation would materially improve the answer.
+            - In hybrid mode, execute clear coding tasks by delegating immediately. Propose only when the task is broad, risky, or genuinely ambiguous.
             - In agent mode, delegation is allowed immediately for code/repo tasks.
             - If the user pasted logs/output or asks "does this tell you anything?", analyze the pasted evidence directly.
             - Do not ask the user to share or rerun output that is already in their message.
             - When delegation is useful, produce a strict contract for the backend.
-            - For edit requests in hybrid mode, prefer propose over execute. The user should review the proposal before edits happen.
+            - For clear bootstrap tasks, use edit_policy=execute.
+            - When you emit a contract, set edit_policy to exactly one literal value: inspect, plan, propose, or execute.
+            - Include task_kind, execution_strategy, target_paths, and verification_checks in delegated contracts.
 
             For direct answers: respond with plain natural-language text only.
             To delegate to the backend: respond with ONLY this JSON object (no other text before or after):
@@ -741,9 +814,13 @@ class LocalPartner:
                 "scope":["src","electron"],
                 "constraints":["Do not install packages"],
                 "commands_allowed":["npm test"],
-                "edit_policy":"inspect|plan|propose|execute",
+                "edit_policy":"propose",
+                "task_kind":"inspection",
+                "execution_strategy":"direct",
                 "expected_result":"...",
-                "files_of_interest":["src/main.tsx"]
+                "files_of_interest":["src/main.tsx"],
+                "target_paths":["src/main.tsx"],
+                "verification_checks":["src/main.tsx exists"]
               }}
             }}
             """
@@ -751,7 +828,7 @@ class LocalPartner:
 
     def parse_frontend_action(self, text):
         text = text.strip()
-        fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
+        fence = re.fullmatch(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
         if fence:
             data = load_json_layers(fence.group(1))
             if isinstance(data, dict) and data.get("mode") in {"reply", "delegate"}:
@@ -759,16 +836,39 @@ class LocalPartner:
                     data["message"] = unwrap_frontend_reply_text(data["message"])
                 return data
         decoder = json.JSONDecoder()
+        if text.startswith("{"):
+            try:
+                obj, end = decoder.raw_decode(text)
+                if isinstance(obj, dict) and obj.get("mode") in {"reply", "delegate"} and text[end:].strip() == "":
+                    if obj.get("mode") == "reply" and isinstance(obj.get("message"), str):
+                        obj["message"] = unwrap_frontend_reply_text(obj["message"])
+                    return obj
+            except json.JSONDecodeError:
+                pass
+        fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.S)
+        if fence:
+            data = load_json_layers(fence.group(1))
+            surrounding = (text[:fence.start()] + text[fence.end():]).strip()
+            if (
+                isinstance(data, dict)
+                and data.get("mode") == "delegate"
+                and "?" not in surrounding
+            ):
+                return data
         for i, ch in enumerate(text):
-            if ch == "{":
-                try:
-                    obj, _ = decoder.raw_decode(text, i)
-                    if isinstance(obj, dict) and obj.get("mode") in {"reply", "delegate"}:
-                        if obj.get("mode") == "reply" and isinstance(obj.get("message"), str):
-                            obj["message"] = unwrap_frontend_reply_text(obj["message"])
-                        return obj
-                except json.JSONDecodeError:
-                    continue
+            if ch != "{":
+                continue
+            try:
+                obj, end = decoder.raw_decode(text, i)
+            except json.JSONDecodeError:
+                continue
+            surrounding = (text[:i] + text[end:]).strip()
+            if (
+                isinstance(obj, dict)
+                and obj.get("mode") == "delegate"
+                and "?" not in surrounding
+            ):
+                return obj
         if text:
             return {"mode": "reply", "message": unwrap_frontend_reply_text(text)}
         raise ValueError(f"Frontend did not return a valid JSON action:\n{text}")
@@ -779,14 +879,33 @@ class LocalPartner:
     def wants_edit(self, prompt):
         return bool(EDIT_INTENT_RE.search(prompt))
 
+    def classify_contract(self, prompt, planning=False):
+        state = inspect_workdir_state(self.workdir)
+        return normalize_contract({}, prompt, self.mode, planning=planning, workdir_state=state)
+
     def must_delegate(self, prompt, planning=False):
+        contract = self.classify_contract(prompt, planning=planning)
         if planning:
+            return True
+        if contract["task_kind"] in {"inspection", "edit_existing", "bootstrap_new"}:
             return True
         if has_pasted_context(prompt):
             return True
         if infer_command_hints(prompt):
             return True
         return bool(re.search(r"\b(inspect|check|search|read|tell me what .* does|look in|explain this repo|analy[sz]e|fails?|failing|error|broken|build)\b", prompt, re.I))
+
+    def progress_label(self, contract):
+        if contract.get("execution_strategy") == "plan_only" or contract.get("edit_policy") in {"plan", "propose"}:
+            return "planning task"
+        if contract.get("task_kind") == "bootstrap_new":
+            target = contract.get("target_directory") or Path(self.workdir).name
+            return f"scaffolding project ({target})"
+        if contract.get("task_kind") == "inspection":
+            return "investigating repo"
+        if contract.get("verification_checks"):
+            return "verifying files"
+        return "executing task"
 
     def frontend_turn(self, user_prompt, planning=False):
         messages = [{"role": "system", "content": self.frontend_system_prompt()}]
@@ -802,11 +921,18 @@ class LocalPartner:
             messages.append({"role": "user", "content": "Chat mode is active. Do not delegate; answer conversationally."})
 
         started = time.monotonic()
-        if self.on_token:
-            raw = self._stream_frontend_turn(self.frontend_model, messages)
-        else:
-            with Spinner(self.ui, self.ui.style("thinking", UI.DIM)):
-                raw = self.chat(self.frontend_model, messages)
+        try:
+            if self.on_token:
+                raw = self._stream_frontend_turn(self.frontend_model, messages)
+            else:
+                with Spinner(self.ui, self.ui.style("thinking", UI.DIM)):
+                    raw = self.chat(self.frontend_model, messages)
+        except TimeoutError:
+            if self.on_token:
+                raw = self._stream_frontend_turn(self.frontend_model, messages)
+            else:
+                with Spinner(self.ui, self.ui.style("retrying frontend", UI.DIM)):
+                    raw = self.chat(self.frontend_model, messages)
         elapsed = time.monotonic() - started
         action = self.parse_frontend_action(raw)
         if self.show_raw_actions and self.verbosity == "debug":
@@ -882,13 +1008,42 @@ class LocalPartner:
         }
         append_run_log(self.workdir, entry)
 
+    def _run_backend(self, contract):
+        self.backend_runs += 1
+        return self.executor.run_contract(contract, load_repo_memory(self.workdir))
+
+    def update_memory(self):
+        paths = memory_paths(self.workdir)
+        current = paths["project"].read_text(encoding="utf-8", errors="replace").strip()
+        recent = load_recent_runs(paths["runs"], limit=8)
+        if not recent:
+            return
+        messages = [{
+            "role": "user",
+            "content": (
+                "Update this project memory file with any new facts learned from recent runs.\n\n"
+                f"Current project.md:\n{current}\n\n"
+                f"Recent runs:\n{recent}\n\n"
+                "Rules: only add new reusable facts (commands, key files, stack, patterns). "
+                "Keep each addition to one line. Do not remove existing entries. "
+                "Return ONLY the full updated file content, no explanation."
+            ),
+        }]
+        with Spinner(self.ui, self.ui.style("updating memory", UI.DIM)):
+            updated = ollama_chat(self.ollama, self.backend_model, messages)
+        updated = updated.strip()
+        if updated and updated != current:
+            paths["project"].write_text(updated + "\n", encoding="utf-8")
+            self.milestone("project memory updated")
+
     def apply_pending_plan(self):
         if not self.pending_plan:
             return None
         contract = dict(self.pending_plan["contract"])
         contract["edit_policy"] = "execute"
+        contract["execution_strategy"] = "inspect_then_execute"
         self.milestone("applying approved plan")
-        report = self.executor.run_contract(contract, load_repo_memory(self.workdir))
+        report = self._run_backend(contract)
         reply = self.frontend_finalize(self.pending_plan["original_prompt"], report, self.pending_plan.get("frontend_message", ""))
         self.last_report = report
         self.last_status = "completed"
@@ -903,11 +1058,11 @@ class LocalPartner:
     def run_readonly_turn(self, user_prompt):
         self.sync_executor()
         self._prune_history()
-        contract = normalize_contract({}, user_prompt, "hybrid")
+        contract = normalize_contract({}, user_prompt, "hybrid", workdir_state=inspect_workdir_state(self.workdir))
         contract["edit_policy"] = "inspect"
         contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
         self.milestone("read-only inspection")
-        report = self.executor.run_contract(contract, load_repo_memory(self.workdir))
+        report = self._run_backend(contract)
         reply = self.frontend_finalize(user_prompt, report)
         self.last_report = report
         self.last_status = "completed"
@@ -925,10 +1080,10 @@ class LocalPartner:
                 return applied
 
         if self.mode == "agent":
-            contract = normalize_contract({}, user_prompt, self.mode)
+            contract = self.classify_contract(user_prompt)
             contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
-            self.milestone("backend executing task")
-            report = self.executor.run_contract(contract, load_repo_memory(self.workdir))
+            self.milestone(self.progress_label(contract))
+            report = self._run_backend(contract)
             reply = self.frontend_finalize(user_prompt, report)
             self.last_report = report
             self.last_status = "completed"
@@ -938,10 +1093,10 @@ class LocalPartner:
             return reply
 
         if self.mode == "hybrid" and self.must_delegate(user_prompt, planning=planning):
-            contract = normalize_contract({}, user_prompt, self.mode, planning=planning)
+            contract = self.classify_contract(user_prompt, planning=planning)
             contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
-            self.milestone("inspecting repo")
-            report = self.executor.run_contract(contract, load_repo_memory(self.workdir))
+            self.milestone(self.progress_label(contract))
+            report = self._run_backend(contract)
             if contract["edit_policy"] in {"plan", "propose"} or report.get("needs_approval"):
                 self.pending_plan = {
                     "original_prompt": user_prompt,
@@ -976,15 +1131,20 @@ class LocalPartner:
             return message
 
         frontend_message = action.get("message", "").strip()
-        contract = normalize_contract(action.get("contract") or {}, user_prompt, self.mode, planning=planning)
+        contract = normalize_contract(
+            action.get("contract") or {},
+            user_prompt,
+            self.mode,
+            planning=planning,
+            workdir_state=inspect_workdir_state(self.workdir),
+        )
         contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
-        if self.mode == "hybrid" and self.wants_edit(user_prompt) and contract["edit_policy"] == "execute":
-            contract["edit_policy"] = "propose"
         if planning:
             contract["edit_policy"] = "plan"
+            contract["execution_strategy"] = "plan_only"
 
-        self.milestone("inspecting repo")
-        report = self.executor.run_contract(contract, load_repo_memory(self.workdir))
+        self.milestone(self.progress_label(contract))
+        report = self._run_backend(contract)
         if contract["edit_policy"] in {"plan", "propose"} or report.get("needs_approval"):
             self.pending_plan = {
                 "original_prompt": user_prompt,
