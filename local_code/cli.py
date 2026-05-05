@@ -8,8 +8,6 @@ import urllib.error
 
 from .agent import LocalPartner
 from .config import (
-    DEFAULT_BACKEND_MODEL,
-    DEFAULT_FRONTEND_MODEL,
     DEFAULT_MODE,
     DEFAULT_MODEL,
     DEFAULT_OLLAMA,
@@ -43,8 +41,8 @@ except Exception:
 def parse_args():
     parser = argparse.ArgumentParser(description="Local coding partner CLI backed by Ollama.")
     parser.add_argument("-m", "--model", default=DEFAULT_MODEL, help=f"Model name override for both roles ({DEFAULT_MODEL})")
-    parser.add_argument("--frontend-model", dest="frontend_model", default=DEFAULT_FRONTEND_MODEL, help=f"Frontend/talker model name ({DEFAULT_FRONTEND_MODEL})")
-    parser.add_argument("--backend-model", dest="backend_model", default=DEFAULT_BACKEND_MODEL, help=f"Backend/coder model name ({DEFAULT_BACKEND_MODEL})")
+    parser.add_argument("--frontend-model", dest="frontend_model", default=None, help="Frontend/talker model name (falls back to --model)")
+    parser.add_argument("--backend-model", dest="backend_model", default=None, help="Backend/coder model name (falls back to --model)")
     parser.add_argument("--planner-model", dest="frontend_model_alias", help="Compatibility alias for --frontend-model")
     parser.add_argument("--coder-model", dest="backend_model_alias", help="Compatibility alias for --backend-model")
     parser.add_argument("--ollama", default=DEFAULT_OLLAMA, help=f"Ollama base URL ({DEFAULT_OLLAMA})")

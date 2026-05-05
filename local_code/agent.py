@@ -1071,6 +1071,24 @@ class LocalPartner:
         self.log_run(user_prompt, reply, contract=contract, report=report)
         return reply
 
+    def _direct_turn(self, user_prompt):
+        """Single model call for chat mode — no JSON delegate logic."""
+        messages = [{"role": "system", "content": self.frontend_system_prompt()}]
+        messages.extend(self.history)
+        messages.append({"role": "user", "content": user_prompt})
+        messages.append({"role": "user", "content": "Chat mode is active. Do not delegate; answer conversationally."})
+        if self.on_token:
+            reply = self._chat_streaming(self.frontend_model, messages)
+        else:
+            with Spinner(self.ui, self.ui.style("thinking", UI.DIM)):
+                reply = self.chat(self.frontend_model, messages).strip()
+        self.last_report = None
+        self.last_status = "reply"
+        self.history.append({"role": "user", "content": user_prompt})
+        self.history.append({"role": "assistant", "content": reply})
+        self.log_run(user_prompt, reply, status="reply")
+        return reply
+
     def run_turn(self, user_prompt, planning=False):
         self.sync_executor()
         self._prune_history()
@@ -1078,6 +1096,9 @@ class LocalPartner:
             applied = self.apply_pending_plan()
             if applied is not None:
                 return applied
+
+        if self.mode == "chat":
+            return self._direct_turn(user_prompt)
 
         if self.mode == "agent":
             contract = self.classify_contract(user_prompt)
