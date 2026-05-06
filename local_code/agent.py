@@ -46,6 +46,7 @@ from .tools import (
     resolve_path,
     run_subprocess,
     search_files,
+    search_web,
     write_file,
 )
 from .ui import Spinner, UI, summarize_action, summarize_text
@@ -184,6 +185,7 @@ class LocalCodeAgent:
             {{"tool":"TOOL_NAME","args":{{...}}}}
 
             Allowed tools:
+            - search_web: {{"query":"search terms","max_results":5}}
             - fetch_url: {{"url":"https://..."}}
             - repo_overview: {{}}
             - list_files: {{"path":"optional path"}}
@@ -285,6 +287,12 @@ class LocalCodeAgent:
     def tool_result(self, tool, args, contract, tracker):
         self.last_tool_display = None
         try:
+            if tool == "search_web":
+                query = args.get("query", "")
+                max_results = int(args.get("max_results", 5))
+                result = search_web(query, max_results=max_results)
+                self.last_tool_display = {"kind": "search_web", "query": query}
+                return result
             if tool == "fetch_url":
                 return fetch_url(args["url"])
             if tool == "repo_overview":
@@ -432,6 +440,9 @@ class LocalCodeAgent:
             return
         if display.get("kind") == "read":
             print(self.ui.tool_line(f"Read  {display['path']}:{display['range']}", color=UI.CYAN), file=sys.stderr)
+            return
+        if display.get("kind") == "search_web":
+            print(self.ui.tool_line(f"Search web  {display['query']!r}", color=UI.CYAN), file=sys.stderr)
             return
         if tool == "search_files":
             matches = 0 if result == "(no matches)" else len([line for line in result.splitlines() if ":" in line])

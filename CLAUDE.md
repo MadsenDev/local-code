@@ -70,7 +70,7 @@ Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `de
 
 ### Tools available to the backend
 
-`repo_overview`, `list_files`, `search_files`, `read_file`, `run_command`, `write_file`, `replace_in_file`, `insert_after`, `final`. File ops use ripgrep (`rg`). All paths are validated by `resolve_path()` to stay within workdir.
+`search_web`, `fetch_url`, `repo_overview`, `list_files`, `search_files`, `read_file`, `run_command`, `write_file`, `replace_in_file`, `replace_lines`, `insert_after`, `final`. File ops use ripgrep (`rg`). All paths are validated by `resolve_path()` to stay within workdir. `search_web` uses DuckDuckGo Lite (no API key); `fetch_url` fetches a specific URL.
 
 ### Key files
 

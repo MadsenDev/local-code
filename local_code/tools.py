@@ -2,6 +2,7 @@ import json
 import re
 import shlex
 import subprocess
+import urllib.parse
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
@@ -26,6 +27,34 @@ class _TextExtractor(HTMLParser):
     def handle_data(self, data):
         if not self._skip and data.strip():
             self.parts.append(data)
+
+
+def search_web(query, max_results=5):
+    url = f"https://lite.duckduckgo.com/lite/?q={urllib.parse.quote(query)}"
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        raw = resp.read().decode("utf-8", errors="replace")
+
+    link_re = re.compile(r'<a[^>]+class="result-link"[^>]*href="([^"]+)"[^>]*>(.*?)</a>', re.S)
+    snippet_re = re.compile(r'class="result-snippet"[^>]*>(.*?)</td>', re.S)
+    tag_re = re.compile(r"<[^>]+>")
+
+    links = link_re.findall(raw)
+    snippets = [tag_re.sub("", s).strip() for s in snippet_re.findall(raw)]
+
+    results = []
+    for i, (href, title) in enumerate(links[:max_results]):
+        title_clean = tag_re.sub("", title).strip()
+        snippet = snippets[i] if i < len(snippets) else ""
+        results.append(f"{i + 1}. {title_clean}\n   {href}\n   {snippet}")
+
+    return "\n\n".join(results) if results else "(no results found)"
 
 
 def fetch_url(url, timeout=15):
