@@ -5,6 +5,7 @@ import subprocess
 import sys
 import textwrap
 import time
+import urllib.error
 from datetime import datetime
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from .contracts import (
     unwrap_frontend_reply_text,
 )
 from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
-from .models import ollama_chat, ollama_stream
+from .models import ollama_assess, ollama_chat, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tools import (
     fetch_url,
@@ -606,6 +607,14 @@ class LocalCodeAgent:
             }
         )
 
+    def run_contract_with_model(self, contract, memory_text, model):
+        original = self.model
+        self.model = model
+        try:
+            return self.run_contract(contract, memory_text)
+        finally:
+            self.model = original
+
     def print_step_intent(self, step, contract, messages):
         return self.step_intent(step, contract, messages)
 
@@ -1008,9 +1017,62 @@ class LocalPartner:
         }
         append_run_log(self.workdir, entry)
 
+    def _assess_complexity(self, contract):
+        if contract.get("edit_policy") in {"inspect", "plan"} or contract.get("task_kind") == "inspection":
+            return "self"
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a task complexity assessor for a local coding assistant.\n\n"
+                    "A SMALL model can handle:\n"
+                    "- Reading or explaining files\n"
+                    "- Answering questions about what the repo does\n"
+                    "- Listing files or structure\n"
+                    "- Simple single-file inspections\n"
+                    "- Chat or conversational questions\n\n"
+                    "A LARGE model is needed for:\n"
+                    "- Editing or refactoring multiple files\n"
+                    "- Bootstrapping or scaffolding new projects\n"
+                    "- Debugging complex failures\n"
+                    "- Tasks explicitly involving architecture changes\n\n"
+                    "The contract's edit_policy is the strongest signal:\n"
+                    '- inspect or plan → almost always "self"\n'
+                    '- execute with multiple files_of_interest → usually "escalate"\n'
+                    '- execute with one file → could be "self"\n\n'
+                    "Reply with exactly one JSON object, no other text:\n"
+                    '{"handle": "self"} or {"handle": "escalate", "reason": "..."}'
+                ),
+            },
+            {"role": "user", "content": json.dumps(contract, ensure_ascii=False)},
+        ]
+        try:
+            raw = ollama_assess(self.ollama, self.frontend_model, messages)
+            data = load_json_layers(raw)
+            if isinstance(data, dict) and data.get("handle") == "self":
+                return "self"
+        except Exception:  # noqa: BLE001
+            pass
+        return "escalate"
+
     def _run_backend(self, contract):
         self.backend_runs += 1
-        return self.executor.run_contract(contract, load_repo_memory(self.workdir))
+        memory = load_repo_memory(self.workdir)
+        if self.frontend_model != self.backend_model:
+            decision = self._assess_complexity(contract)
+            if decision == "escalate":
+                self.milestone(f"complex task → escalating to {self.backend_model}")
+                return self.executor.run_contract_with_model(contract, memory, self.backend_model)
+            else:
+                self.milestone(f"simple task → handling with {self.frontend_model}")
+                try:
+                    return self.executor.run_contract_with_model(contract, memory, self.frontend_model)
+                except urllib.error.HTTPError as exc:
+                    if exc.code == 404:
+                        self.milestone(f"{self.frontend_model} not available, falling back to {self.backend_model}")
+                        return self.executor.run_contract_with_model(contract, memory, self.backend_model)
+                    raise
+        return self.executor.run_contract(contract, memory)
 
     def update_memory(self):
         paths = memory_paths(self.workdir)

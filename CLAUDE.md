@@ -25,8 +25,12 @@ This is a **two-model AI coding CLI** backed by Ollama. The key architectural id
 
 ### Dual-model design
 
-- **Frontend** (`gemma3:12b` default): User-facing conversational model. In hybrid mode, decides whether to answer directly or delegate to the backend by emitting a JSON action `{"mode":"delegate","contract":{...}}`. Final answer is always composed by the frontend via `frontend_finalize()`.
-- **Backend** (`qwen2.5-coder:14b` default): Headless code worker. Receives a *contract* (JSON object specifying task scope, permissions, edit policy) and executes a tool loop, emitting `{"tool":"...","args":{...}}` on every turn until it emits `{"tool":"final","args":{...}}`.
+- **Frontend** (`qwen3:8b` default): User-facing conversational model. In hybrid/agent mode, decides whether to answer directly or delegate to the backend. Also acts as a *complexity assessor* — before any backend tool loop runs (when models differ), the frontend makes a lightweight pre-flight call (`ollama_assess`) to decide whether to run the task with itself or escalate to the stronger backend model.
+- **Backend** (`qwen3:14b` default): Headless code worker. Receives a *contract* (JSON object specifying task scope, permissions, edit policy) and executes a tool loop, emitting `{"tool":"...","args":{...}}` on every turn until it emits `{"tool":"final","args":{...}}`.
+
+### Escalation flow
+
+When `frontend_model != backend_model`, `LocalPartner._run_backend()` calls `_assess_complexity(contract)` before running the tool loop. The frontend model responds with `{"handle":"self"}` or `{"handle":"escalate","reason":"..."}`. Simple tasks (read-only, single-file, chat) run with the frontend model; complex tasks (multi-file edits, refactoring, bootstrapping) escalate to the backend model via `LocalCodeAgent.run_contract_with_model()`. On any parse failure the default is to escalate (safe fallback). When both models are the same, the assessment call is skipped entirely.
 
 ### Tool loop (`agent.py`)
 
