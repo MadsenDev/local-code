@@ -161,8 +161,8 @@ class LocalCodeAgent:
             - Read files before editing them.
             - Respect edit_policy:
               - inspect: do not edit files
-              - plan: do not edit files; produce a concrete plan
-              - propose: do not edit files; inspect and propose changes that would be made
+              - plan: do not edit files. Read the relevant source files first, then produce a concrete plan. Every plan step must name a real file that exists in the repo, a specific function or section to change, and exactly what the change would be. Generic suggestions without file references are not acceptable.
+              - propose: do not edit files. Read the relevant source files first, then propose the exact changes that would be made, including file paths and code snippets showing before/after.
               - execute: inspect, then apply the requested changes if justified
             - Respect commands_allowed. Do not try commands outside it when that list is non-empty.
             - Final output must be a JSON report in the final tool with this shape:
@@ -178,7 +178,8 @@ class LocalCodeAgent:
                 "needs_approval": true_or_false,
                 "plan": ["concrete step 1", "concrete step 2"]
               }}
-            - In plan or propose mode: populate diff_summary with a real unified diff showing exactly what lines would change. Read each file first, then produce --- / +++ / @@ hunks. Populate plan with one entry per file change.
+            - In plan mode: the "plan" array must contain one entry per concrete change, formatted as "Edit <filename>:<function_or_section> — <what changes and why>". The "diff_summary" field must contain a real unified diff (--- a/path, +++ b/path, @@ ... @@) showing the exact lines that would change. Read files before writing the diff.
+            - In propose mode: populate diff_summary with a real unified diff showing exactly what lines would change. Read each file first, then produce --- / +++ / @@ hunks. Populate plan with one entry per file change.
             - Return exactly one JSON object using the tool schema and no prose outside it.
 
             Tool schema:
@@ -459,7 +460,7 @@ class LocalCodeAgent:
     def run_contract(self, contract, memory_text):
         self.command_approval_cache = {}
         self.command_prefix_approval_cache = {}
-        if contract.get("edit_policy") in {"inspect", "plan", "propose"} and contract.get("files_of_interest"):
+        if contract.get("edit_policy") == "inspect" and contract.get("files_of_interest"):
             return self.direct_report(contract, memory_text)
         messages = [{"role": "system", "content": self.system_prompt(contract, memory_text)}]
         if contract.get("edit_policy") in {"inspect", "plan", "propose"}:
@@ -1029,7 +1030,7 @@ class LocalPartner:
         append_run_log(self.workdir, entry)
 
     def _assess_complexity(self, contract):
-        if contract.get("edit_policy") in {"inspect", "plan"} or contract.get("task_kind") == "inspection":
+        if contract.get("edit_policy") == "inspect" or contract.get("task_kind") == "inspection":
             return "self"
         messages = [
             {

@@ -251,6 +251,9 @@ def normalize_contract(contract, user_prompt, mode, planning=False, workdir_stat
         "target_paths": target_paths,
         "verification_checks": verification_checks,
     }
+    if edit_policy == "plan" and workdir_state["has_project_markers"]:
+        extra = [m for m in workdir_state["project_markers"] if m not in (normalized.get("files_of_interest") or [])]
+        normalized["files_of_interest"] = (normalized.get("files_of_interest") or []) + extra[:6]
     if bootstrap_variant:
         normalized["bootstrap_template"] = bootstrap_variant
     if task_kind == "bootstrap_new":
