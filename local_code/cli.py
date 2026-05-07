@@ -8,8 +8,9 @@ import urllib.error
 
 from .agent import LocalPartner
 from .config import (
+    DEFAULT_BACKEND_MODEL,
+    DEFAULT_FRONTEND_MODEL,
     DEFAULT_MODE,
-    DEFAULT_MODEL,
     DEFAULT_OLLAMA,
     DEFAULT_VERBOSITY,
     HELP_TEXT,
@@ -40,7 +41,7 @@ except Exception:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Local coding partner CLI backed by Ollama.")
-    parser.add_argument("-m", "--model", default=DEFAULT_MODEL, help=f"Model name override for both roles ({DEFAULT_MODEL})")
+    parser.add_argument("-m", "--model", default=None, help=f"Model name override for both roles (default: role-specific)")
     parser.add_argument("--frontend-model", dest="frontend_model", default=None, help="Frontend/talker model name (falls back to --model)")
     parser.add_argument("--backend-model", dest="backend_model", default=None, help="Backend/coder model name (falls back to --model)")
     parser.add_argument("--planner-model", dest="frontend_model_alias", help="Compatibility alias for --frontend-model")
@@ -652,8 +653,8 @@ def interactive_loop(agent):
 
 def main():
     args = parse_args()
-    frontend_model = args.frontend_model_alias or args.frontend_model or args.model
-    backend_model = args.backend_model_alias or args.backend_model or args.model
+    frontend_model = args.frontend_model_alias or args.frontend_model or args.model or DEFAULT_FRONTEND_MODEL
+    backend_model = args.backend_model_alias or args.backend_model or args.model or DEFAULT_BACKEND_MODEL
     command_permission = "allow" if args.auto_approve else "ask"
     agent = LocalPartner(
         frontend_model=frontend_model,

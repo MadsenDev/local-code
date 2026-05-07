@@ -1030,7 +1030,11 @@ class LocalPartner:
         append_run_log(self.workdir, entry)
 
     def _assess_complexity(self, contract):
-        if contract.get("edit_policy") == "inspect" or contract.get("task_kind") == "inspection":
+        edit_policy = contract.get("edit_policy")
+        task_kind = contract.get("task_kind")
+        if edit_policy in {"plan", "propose", "execute"}:
+            return "escalate"
+        if edit_policy == "inspect" or task_kind == "inspection":
             return "self"
         messages = [
             {
