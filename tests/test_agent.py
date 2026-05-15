@@ -208,6 +208,90 @@ class TestRoutingAndFailures:
         assert seen["contract"]["task_kind"] == "inspection"
         assert seen["contract"]["edit_policy"] == "inspect"
 
+    def test_project_discovery_uses_deterministic_read_only_profile(self, tmp_path):
+        (tmp_path / "package.json").write_text(
+            '{"name":"desktop-tool","scripts":{"dev":"vite","tauri":"tauri dev"},"dependencies":{"@tauri-apps/api":"1.0.0","react":"18.0.0","react-dom":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}',
+            encoding="utf-8",
+        )
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.tsx").write_text("import React from 'react'\n", encoding="utf-8")
+        (tmp_path / "src-tauri").mkdir()
+        (tmp_path / "src-tauri" / "tauri.conf.json").write_text("{}\n", encoding="utf-8")
+        partner = LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            mode="hybrid",
+        )
+
+        reply = partner.run_turn("Without making edits, what can you tell me about this project?")
+
+        assert "## Project overview" in reply
+        assert "Tauri" in reply
+        assert "React" in reply
+        assert partner.last_report["files_changed"] == []
+        assert partner.latest_plan is None
+
+    def test_read_only_prompt_forces_inspect_policy_even_with_modify_word(self, monkeypatch, tmp_path):
+        partner = LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="allow",
+            edit_permission="allow",
+            verbosity="quiet",
+            mode="agent",
+        )
+        seen = {}
+
+        def fake_run_backend(contract):
+            seen["contract"] = contract
+            return {"summary": "inspected", "commands_run": [], "files_read": [], "files_changed": [], "needs_approval": False}
+
+        monkeypatch.setattr(partner, "_run_backend", fake_run_backend)
+        monkeypatch.setattr(partner, "frontend_finalize", lambda *args: "inspection")
+
+        reply = partner.run_turn("Do not modify anything, inspect package.json")
+
+        assert reply == "inspection"
+        assert seen["contract"]["edit_policy"] == "inspect"
+        assert seen["contract"]["read_only"] is True
+
+    def test_invalid_tool_recovery_lists_available_tools(self, monkeypatch, tmp_path):
+        agent = LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            max_steps=2,
+            verbosity="quiet",
+        )
+        calls = {"count": 0, "messages": []}
+
+        def fake_chat(messages):
+            calls["count"] += 1
+            calls["messages"] = list(messages)
+            if calls["count"] == 1:
+                return '{"tool":"write_file","args":{"path":"x","content":"bad"}}'
+            return '{"tool":"final","args":{"summary":"stopped","findings":[]}}'
+
+        monkeypatch.setattr(agent, "chat", fake_chat)
+
+        report = agent.run_contract({"goal": "inspect", "edit_policy": "inspect", "read_only": True}, "")
+
+        assert report["summary"] == "stopped"
+        recovery_prompt = calls["messages"][-1]["content"]
+        assert "Available tools:" in recovery_prompt
+        assert "repo_map" in recovery_prompt
+        available_block = recovery_prompt.split("You must respond", 1)[0]
+        assert "write_file" not in available_block
+
     def test_backend_timeout_is_structured(self, monkeypatch, tmp_path):
         agent = LocalCodeAgent(
             model="test",

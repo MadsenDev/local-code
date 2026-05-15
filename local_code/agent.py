@@ -36,6 +36,9 @@ from .models import ollama_assess, ollama_chat, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tools import (
     fetch_url,
+    build_project_profile,
+    format_project_profile,
+    format_repo_map,
     git_context,
     insert_after,
     list_files,
@@ -100,6 +103,66 @@ class LocalCodeAgent:
         if self.verbosity in {"normal", "debug"}:
             print(self.ui.transcript_item(title, lines or [], color=color), file=sys.stderr)
 
+    def allowed_tool_names(self, contract):
+        if contract.get("read_only") or contract.get("edit_policy") == "inspect":
+            return {
+                "repo_map",
+                "repo_overview",
+                "list_files",
+                "search_files",
+                "read_file",
+                "final",
+            }
+        return {
+            "search_web",
+            "fetch_url",
+            "repo_map",
+            "repo_overview",
+            "list_files",
+            "search_files",
+            "read_file",
+            "run_command",
+            "write_file",
+            "replace_lines",
+            "replace_in_file",
+            "insert_after",
+            "final",
+        }
+
+    def allowed_tools_text(self, contract):
+        specs = {
+            "search_web": '- search_web: {"query":"search terms","max_results":5}',
+            "fetch_url": '- fetch_url: {"url":"https://..."}',
+            "repo_map": '- repo_map: {}',
+            "repo_overview": '- repo_overview: {}',
+            "list_files": '- list_files: {"path":"optional path"}',
+            "search_files": '- search_files: {"query":"text or regex","path":"optional path"}',
+            "read_file": '- read_file: {"path":"file path","start":1,"end":500}',
+            "run_command": '- run_command: {"command":"shell command","timeout":30}',
+            "write_file": '- write_file: {"path":"file path","content":"full file content"}',
+            "replace_lines": '- replace_lines: {"path":"file path","start":10,"end":15,"content":"replacement lines"}',
+            "replace_in_file": '- replace_in_file: {"path":"file path","old":"exact old text","new":"replacement text","count":1}',
+            "insert_after": '- insert_after: {"path":"file path","anchor":"exact anchor text","content":"text to insert","occurrence":1}',
+            "final": '- final: {"summary":"...","findings":[...],"files_read":[...],"files_changed":[...],"diff_summary":"...","commands_run":[...],"tests_run":[...],"risks":[...],"needs_approval":false,"plan":[...]}',
+        }
+        allowed = self.allowed_tool_names(contract)
+        order = [
+            "search_web",
+            "fetch_url",
+            "repo_map",
+            "repo_overview",
+            "list_files",
+            "search_files",
+            "read_file",
+            "run_command",
+            "write_file",
+            "replace_lines",
+            "replace_in_file",
+            "insert_after",
+            "final",
+        ]
+        return "\n".join(specs[name] for name in order if name in allowed)
+
     def allow_command(self, command, allowed_commands, approval_prefixes=None):
         if allowed_commands:
             for allowed in allowed_commands:
@@ -150,6 +213,9 @@ class LocalCodeAgent:
             Task contract:
             {json.dumps(contract, ensure_ascii=False, indent=2)}
 
+            Active tool mode:
+            {"read-only inspection; only repo_map, repo_overview, list_files, search_files, read_file, and final are allowed." if contract.get("read_only") or contract.get("edit_policy") == "inspect" else "full tool mode subject to permissions and edit_policy."}
+
             Rules:
             - Follow the contract strictly.
             - If the contract contains pasted context/output, analyze that pasted evidence first.
@@ -186,18 +252,7 @@ class LocalCodeAgent:
             {{"tool":"TOOL_NAME","args":{{...}}}}
 
             Allowed tools:
-            - search_web: {{"query":"search terms","max_results":5}}
-            - fetch_url: {{"url":"https://..."}}
-            - repo_overview: {{}}
-            - list_files: {{"path":"optional path"}}
-            - search_files: {{"query":"text or regex","path":"optional path"}}
-            - read_file: {{"path":"file path","start":1,"end":500}}
-            - run_command: {{"command":"shell command","timeout":30}}
-            - write_file: {{"path":"file path","content":"full file content"}}
-            - replace_lines: {{"path":"file path","start":10,"end":15,"content":"replacement lines"}}  ← preferred for surgical edits; read the file first to get line numbers
-            - replace_in_file: {{"path":"file path","old":"exact old text","new":"replacement text","count":1}}
-            - insert_after: {{"path":"file path","anchor":"exact anchor text","content":"text to insert","occurrence":1}}
-            - final: {{"summary":"...","findings":[...],"files_read":[...],"files_changed":[...],"diff_summary":"...","commands_run":[...],"tests_run":[...],"risks":[...],"needs_approval":false,"plan":[...]}}
+            {self.allowed_tools_text(contract)}
             """
         ).strip()
 
@@ -264,6 +319,25 @@ class LocalCodeAgent:
         )
         return report
 
+    def project_profile_report(self, contract):
+        profile = build_project_profile(self.workdir, contract.get("exploration_budget") or None)
+        summary = format_project_profile(profile)
+        findings = list(profile.get("confirmed") or [])
+        findings.extend(profile.get("likely") or [])
+        findings.extend("Unclear: " + item for item in (profile.get("uncertainties") or []))
+        return normalize_backend_report(
+            {
+                "summary": summary,
+                "findings": findings,
+                "commands_run": [],
+                "files_read": profile.get("files_read") or [],
+                "files_changed": [],
+                "risks": profile.get("uncertainties") or [],
+                "needs_approval": False,
+                "plan": [],
+            }
+        )
+
     def parse_action(self, text):
         text = text.strip()
         fence = re.search(r"```(?:json)?\s*(\{.*\})\s*```", text, re.S)
@@ -296,6 +370,8 @@ class LocalCodeAgent:
                 return result
             if tool == "fetch_url":
                 return fetch_url(args["url"])
+            if tool == "repo_map":
+                return format_repo_map(self.workdir)
             if tool == "repo_overview":
                 return repo_overview(self.workdir)
             if tool == "list_files":
@@ -313,6 +389,8 @@ class LocalCodeAgent:
                 }
                 return result
             if tool == "run_command":
+                if contract.get("read_only") or contract.get("edit_policy") == "inspect":
+                    return "Command blocked by read-only inspection mode."
                 command = args["command"]
                 allowed, reason = self.allow_command(
                     command,
@@ -540,6 +618,38 @@ class LocalCodeAgent:
 
             tool = action["tool"]
             args = action.get("args") or {}
+            if tool not in self.allowed_tool_names(contract):
+                invalid_action_count += 1
+                self.trace_print(f"invalid backend tool {tool!r}; asking it to retry")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self.invalid_action_hint(
+                            contract,
+                            step,
+                            f"Tool {tool!r} is not available in the current mode.",
+                            invalid_action_count,
+                            tracker,
+                        ),
+                    }
+                )
+                if invalid_action_count >= 4:
+                    self.transcript_print(
+                        "Stopped backend loop",
+                        ["Backend did not produce a valid allowed tool call after repeated retries."],
+                        color=UI.YELLOW,
+                    )
+                    return normalize_backend_report(
+                        {
+                            "summary": "Stopped because the backend failed to produce a valid allowed tool call.",
+                            "commands_run": tracker["commands_run"],
+                            "files_read": sorted(tracker["files_read"]),
+                            "files_changed": sorted(tracker["files_changed"]),
+                            "needs_approval": False,
+                            "risks": ["Backend produced invalid actions repeatedly before making progress."],
+                        }
+                    )
+                continue
             self.last_backend_action = action
             signature = self.action_signature(tool, args)
             if signature == self.last_backend_action_signature:
@@ -670,10 +780,22 @@ class LocalCodeAgent:
             else:
                 tool_hint = 'Use a targeted read/search tool, or {"tool":"final","args":{"summary":"...","findings":[...]}} if you already have the finding.'
         else:
-            tool_hint = 'Use a single JSON tool call, then wait for the result.'
-        return (
-            "Your previous response was invalid. Return exactly one JSON object only. "
-            f"Error: {error}.{progress} {tool_hint}"
+            if contract.get("read_only") or contract.get("edit_policy") == "inspect":
+                tool_hint = 'Use {"tool":"repo_map","args":{}} or a read/search tool.'
+            else:
+                tool_hint = 'Use a single JSON tool call, then wait for the result.'
+        return "\n".join(
+            [
+                "Your last response was not a valid tool call.",
+                "",
+                "Available tools:",
+                self.allowed_tools_text(contract),
+                "",
+                "You must respond with exactly one valid tool call as JSON.",
+                "Do not explain.",
+                "Do not invent tools.",
+                f"Error: {error}.{progress} {tool_hint}",
+            ]
         )
 
     def verify_contract_outputs(self, contract):
@@ -900,6 +1022,27 @@ class LocalPartner:
     def wants_edit(self, prompt):
         return bool(EDIT_INTENT_RE.search(prompt))
 
+    def wants_read_only_inspection(self, prompt):
+        explicit_read_only = bool(re.search(r"\b(without (?:making )?edits?|do not modify|don't modify|do not edit|don't edit|no edits?)\b", prompt, re.I))
+        if explicit_read_only:
+            return True
+        return bool(
+            re.search(
+                r"\b(inspect|review|summarize|tell me about|what can you tell me|read key files)\b",
+                prompt,
+                re.I,
+            )
+        ) and not self.wants_edit(prompt)
+
+    def wants_project_discovery(self, prompt):
+        return bool(
+            re.search(
+                r"\b(what is this project|what can you tell me about this project|tell me about (?:this )?(?:repo|repository|project|codebase)|analy[sz]e (?:this )?(?:repo|repository|project|codebase)|figure out what this (?:does|is)|review the structure|understand this codebase|read key files until (?:you )?know what this is)\b",
+                prompt,
+                re.I,
+            )
+        )
+
     def classify_contract(self, prompt, planning=False):
         state = inspect_workdir_state(self.workdir)
         return normalize_contract({}, prompt, self.mode, planning=planning, workdir_state=state)
@@ -917,6 +1060,8 @@ class LocalPartner:
         return bool(re.search(r"\b(inspect|check|search|read|tell me what .* does|look in|explain this repo|analy[sz]e|fails?|failing|error|broken|build)\b", prompt, re.I))
 
     def progress_label(self, contract):
+        if contract.get("task_kind") == "repo_discovery":
+            return "read-only repo discovery"
         if contract.get("execution_strategy") == "plan_only" or contract.get("edit_policy") in {"plan", "propose"}:
             return "planning task"
         if contract.get("task_kind") == "bootstrap_new":
@@ -1138,10 +1283,52 @@ class LocalPartner:
         self._prune_history()
         contract = normalize_contract({}, user_prompt, "hybrid", workdir_state=inspect_workdir_state(self.workdir))
         contract["edit_policy"] = "inspect"
+        contract["read_only"] = True
         contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
         self.milestone("read-only inspection")
         report = self._run_backend(contract)
         reply = self.frontend_finalize(user_prompt, report)
+        self.last_report = report
+        self.last_status = "completed"
+        self.history.append({"role": "user", "content": user_prompt})
+        self.history.append({"role": "assistant", "content": reply})
+        self.log_run(user_prompt, reply, contract=contract, report=report)
+        return reply
+
+    def run_project_discovery_turn(self, user_prompt):
+        self.sync_executor()
+        self._prune_history()
+        budget = {
+            "max_root_files": 50,
+            "max_reads": 20 if re.search(r"\b(deep|thorough|detailed)\b", user_prompt, re.I) else 12,
+            "max_searches": 12 if re.search(r"\b(deep|thorough|detailed)\b", user_prompt, re.I) else 8,
+            "max_lines_per_file": 500,
+            "stop_when_confidence": "medium",
+        }
+        contract = {
+            "goal": user_prompt.strip(),
+            "scope": ["."],
+            "constraints": [
+                "Read-only repo discovery.",
+                "Do not rely on a single project.md file; inspect package, config, docs, and entrypoints.",
+                "Build conclusions from deterministic framework markers before model inference.",
+            ],
+            "commands_allowed": [],
+            "approval_prefixes": [],
+            "edit_policy": "inspect",
+            "read_only": True,
+            "expected_result": "Structured project overview with confirmed facts, likely conclusions, uncertainties, and confidence levels.",
+            "files_of_interest": [],
+            "task_kind": "repo_discovery",
+            "execution_strategy": "direct",
+            "target_paths": [],
+            "verification_checks": [],
+            "exploration_budget": budget,
+        }
+        self.milestone("mode: read-only inspection")
+        self.milestone("allowed tools: repo_map, repo_overview, list_files, search_files, read_file")
+        report = self.executor.project_profile_report(contract)
+        reply = report["summary"]
         self.last_report = report
         self.last_status = "completed"
         self.history.append({"role": "user", "content": user_prompt})
@@ -1175,11 +1362,17 @@ class LocalPartner:
             if applied is not None:
                 return applied
 
+        if not planning and self.wants_project_discovery(user_prompt):
+            return self.run_project_discovery_turn(user_prompt)
+
         if self.mode == "chat":
             return self._direct_turn(user_prompt)
 
         if self.mode == "agent":
             contract = self.classify_contract(user_prompt)
+            if self.wants_read_only_inspection(user_prompt):
+                contract["edit_policy"] = "inspect"
+                contract["read_only"] = True
             contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
             self.milestone(self.progress_label(contract))
             report = self._run_backend(contract)
@@ -1193,6 +1386,9 @@ class LocalPartner:
 
         if self.mode == "hybrid" and self.must_delegate(user_prompt, planning=planning):
             contract = self.classify_contract(user_prompt, planning=planning)
+            if self.wants_read_only_inspection(user_prompt):
+                contract["edit_policy"] = "inspect"
+                contract["read_only"] = True
             contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
             self.milestone(self.progress_label(contract))
             report = self._run_backend(contract)
@@ -1237,6 +1433,9 @@ class LocalPartner:
             planning=planning,
             workdir_state=inspect_workdir_state(self.workdir),
         )
+        if self.wants_read_only_inspection(user_prompt):
+            contract["edit_policy"] = "inspect"
+            contract["read_only"] = True
         contract["files_of_interest"] = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
         if planning:
             contract["edit_policy"] = "plan"

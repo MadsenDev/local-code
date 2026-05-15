@@ -1,6 +1,16 @@
 import pytest
 from pathlib import Path
-from local_code.tools import resolve_path, replace_in_file, replace_lines, write_file, read_file, insert_after
+from local_code.tools import (
+    build_project_profile,
+    format_project_profile,
+    format_repo_map,
+    insert_after,
+    read_file,
+    replace_in_file,
+    replace_lines,
+    resolve_path,
+    write_file,
+)
 
 
 class TestResolvePath:
@@ -69,3 +79,87 @@ class TestFileOps:
         write_file(str(tmp_path), "f.py", "a = 1\n")
         result = replace_lines(str(tmp_path), "f.py", 5, 10, "x\n")
         assert "out of bounds" in result
+
+
+class TestRepoDiscovery:
+    def test_detects_tauri_react_vite(self, tmp_path):
+        write_file(
+            str(tmp_path),
+            "package.json",
+            '{"name":"desktop-tool","scripts":{"dev":"vite","tauri":"tauri dev"},"dependencies":{"@tauri-apps/api":"1.0.0","react":"18.0.0","react-dom":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}',
+        )
+        write_file(str(tmp_path), "vite.config.ts", "export default {}\n")
+        write_file(str(tmp_path), "src/main.tsx", "import React from 'react'\n")
+        write_file(str(tmp_path), "src/App.tsx", "export function App() { return null }\n")
+        write_file(str(tmp_path), "src-tauri/tauri.conf.json", "{}\n")
+        write_file(str(tmp_path), "src-tauri/Cargo.toml", "[package]\nname='app'\n")
+
+        profile = build_project_profile(str(tmp_path))
+        rendered = format_project_profile(profile)
+
+        assert "Tauri" in profile["desktop_runtime"]
+        assert "React" in profile["frontend"]
+        assert "Vite" in profile["frontend"]
+        assert profile["confidence"]["tech_stack"] == "high"
+        assert "This appears to be a Tauri desktop app with a React frontend" in rendered
+
+    def test_does_not_claim_electron_from_leftover_directory(self, tmp_path):
+        write_file(
+            str(tmp_path),
+            "package.json",
+            '{"name":"desktop-tool","scripts":{"tauri":"tauri dev"},"dependencies":{"@tauri-apps/api":"1.0.0","react":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}',
+        )
+        write_file(str(tmp_path), "src-tauri/tauri.conf.json", "{}\n")
+        write_file(str(tmp_path), "electron/main.ts", "console.log('old')\n")
+
+        profile = build_project_profile(str(tmp_path))
+
+        assert "Tauri" in profile["desktop_runtime"]
+        assert "Electron" not in profile["desktop_runtime"]
+        assert any("Electron-looking files" in item for item in profile["likely"])
+
+    def test_repo_map_ignores_noisy_directories(self, tmp_path):
+        write_file(str(tmp_path), "package.json", '{"dependencies":{"react":"18.0.0"}}')
+        write_file(str(tmp_path), "node_modules/pkg/index.js", "noise")
+        write_file(str(tmp_path), "dist/app.js", "noise")
+        write_file(str(tmp_path), "src/main.tsx", "entry")
+
+        rendered = format_repo_map(str(tmp_path))
+
+        assert "package.json" in rendered
+        assert "src/" in rendered
+        assert "node_modules" not in rendered
+        assert "dist/" not in rendered
+        assert "React entrypoint found" in rendered
+
+    def test_extracts_semantic_capabilities_from_source(self, tmp_path):
+        write_file(
+            str(tmp_path),
+            "package.json",
+            '{"name":"local-hub","scripts":{"tauri":"tauri dev"},"dependencies":{"@tauri-apps/api":"2.0.0","react":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}',
+        )
+        write_file(
+            str(tmp_path),
+            "src/App.tsx",
+            "import { ReposView } from './view-repos';\nimport { PortsView } from './view-ports';\nimport { LogsView } from './view-logs';\n",
+        )
+        write_file(
+            str(tmp_path),
+            "src/tauri-api.ts",
+            "const api = { scanPorts: () => invoke<LivePort[]>('scan_ports'), getGitStatus: () => invoke<GitStatus>('get_git_status') }\ninterface LivePort { port: number }\ninterface GitStatus { branch: string }\n",
+        )
+        write_file(
+            str(tmp_path),
+            "src-tauri/src/commands.rs",
+            "#[tauri::command]\npub fn scan_workspace_groups() {}\n#[tauri::command]\npub fn kill_process() {}\n",
+        )
+
+        profile = build_project_profile(str(tmp_path))
+        rendered = format_project_profile(profile)
+
+        assert any("repository view" in item for item in profile["capabilities"])
+        assert any("scans localhost ports" in item for item in profile["capabilities"])
+        assert any("Git status" in item or "git status" in item for item in profile["source_signals"])
+        assert "### Source behavior signals" in rendered
+        assert "### Inferred capabilities" in rendered
+        assert "for managing local development workspaces, repositories" in rendered
