@@ -218,6 +218,8 @@ class LocalCodeAgent:
 
             Rules:
             - Follow the contract strictly.
+            - If the contract includes intent_analysis, use it as the first-pass interpretation of the user's actual goal, non-goals, needed context, risks, and success criteria.
+            - Before editing, explicitly satisfy the intent_analysis needed_context where applicable and avoid the not_the_goal items.
             - If the contract contains pasted context/output, analyze that pasted evidence first.
             - Do not respond with generic reproduction commands when the user already pasted command output.
             - For database/foreign-key tasks, prioritize targeted searches for schema, migrations, SQLite/database initialization, account insertion, onboarding, and connection-test persistence.
@@ -1174,6 +1176,96 @@ class LocalPartner:
         }
         append_run_log(self.workdir, entry)
 
+    def _compact_string_list(self, value, limit=6):
+        if not isinstance(value, list):
+            return []
+        items = []
+        for item in value:
+            text = str(item).strip()
+            if text and text not in items:
+                items.append(text[:300])
+            if len(items) >= limit:
+                break
+        return items
+
+    def _intent_analysis(self, contract):
+        """Run a small, bounded intent pass before tool work.
+
+        This is deliberately separate from implementation so weaker local models get
+        one narrow job: decide what the user is actually asking for, what is out of
+        scope, and what context should be inspected before edits. Failures are
+        non-fatal because the normal contract is still sufficient to proceed.
+        """
+        if contract.get("intent_analysis"):
+            return contract.get("intent_analysis")
+        messages = [
+            {
+                "role": "system",
+                "content": textwrap.dedent(
+                    """\
+                    You are the Intent Analyst for a local coding agent.
+                    Your only job is to clarify the user's goal before any repo edits happen.
+                    Do not solve the task. Do not propose code. Be compact and concrete.
+
+                    Return exactly one JSON object with this schema and no prose:
+                    {
+                      "user_goal": "plain-language goal",
+                      "not_the_goal": ["things that would be overreach"],
+                      "needed_context": ["files, symbols, commands, or evidence to inspect before editing"],
+                      "likely_files": ["repo-relative file paths or globs if inferable"],
+                      "risks": ["ambiguities, assumptions, or things that could break"],
+                      "success_criteria": ["observable outcomes that mean the task is done"]
+                    }
+                    """
+                ).strip(),
+            },
+            {"role": "user", "content": "Task contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2)},
+        ]
+        try:
+            raw = ollama_assess(self.ollama, self.frontend_model, messages)
+            data = load_json_layers(raw)
+        except Exception:  # noqa: BLE001
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        user_goal = str(data.get("user_goal") or contract.get("goal") or "").strip()
+        analysis = {
+            "user_goal": user_goal[:500],
+            "not_the_goal": self._compact_string_list(data.get("not_the_goal"), limit=6),
+            "needed_context": self._compact_string_list(data.get("needed_context"), limit=8),
+            "likely_files": self._compact_string_list(data.get("likely_files"), limit=8),
+            "risks": self._compact_string_list(data.get("risks"), limit=6),
+            "success_criteria": self._compact_string_list(data.get("success_criteria"), limit=6),
+        }
+        return {key: value for key, value in analysis.items() if value}
+
+    def _contract_with_intent_scaffold(self, contract):
+        if contract.get("intent_analysis"):
+            return contract
+        if contract.get("task_kind") == "conversation":
+            return contract
+        analysis = self._intent_analysis(contract)
+        if not analysis:
+            return contract
+        enriched = dict(contract)
+        enriched["intent_analysis"] = analysis
+        likely_files = analysis.get("likely_files") or []
+        if likely_files:
+            existing = list(enriched.get("files_of_interest") or [])
+            for path in resolve_repo_file_hints(self.workdir, likely_files):
+                if path not in existing:
+                    existing.append(path)
+            enriched["files_of_interest"] = existing
+        guardrails = list(enriched.get("constraints") or [])
+        if analysis.get("not_the_goal"):
+            guardrails.append("Do not overreach beyond the intent analysis not_the_goal list.")
+        if analysis.get("needed_context"):
+            guardrails.append("Inspect the intent analysis needed_context before editing when applicable.")
+        if analysis.get("success_criteria"):
+            guardrails.append("Use the intent analysis success_criteria to decide when to stop.")
+        enriched["constraints"] = guardrails
+        return enriched
+
     def _assess_complexity(self, contract):
         edit_policy = contract.get("edit_policy")
         task_kind = contract.get("task_kind")
@@ -1218,6 +1310,7 @@ class LocalPartner:
 
     def _run_backend(self, contract):
         self.backend_runs += 1
+        contract = self._contract_with_intent_scaffold(contract)
         memory = load_repo_memory(self.workdir)
         if self.frontend_model != self.backend_model:
             decision = self._assess_complexity(contract)

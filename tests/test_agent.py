@@ -328,3 +328,65 @@ class TestRoutingAndFailures:
         )
 
         assert partner.apply_pending_plan() is None
+
+
+class TestIntentScaffolding:
+    def test_enriches_backend_contract_with_compact_intent_analysis(self, monkeypatch, tmp_path):
+        (tmp_path / "app.py").write_text("print('hi')\n", encoding="utf-8")
+        partner = LocalPartner(
+            frontend_model="small",
+            backend_model="small",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            mode="hybrid",
+        )
+
+        def fake_assess(ollama, model, messages):
+            assert model == "small"
+            assert "Intent Analyst" in messages[0]["content"]
+            return '''{
+                "user_goal": "Fix the app startup bug.",
+                "not_the_goal": ["Rewrite the app"],
+                "needed_context": ["Read app.py before editing"],
+                "likely_files": ["app.py"],
+                "risks": ["May need a test"],
+                "success_criteria": ["app.py still imports"]
+            }'''
+
+        monkeypatch.setattr("local_code.agent.ollama_assess", fake_assess)
+
+        contract = partner._contract_with_intent_scaffold(
+            {
+                "goal": "fix startup",
+                "task_kind": "edit_existing",
+                "edit_policy": "execute",
+                "constraints": [],
+                "files_of_interest": [],
+            }
+        )
+
+        assert contract["intent_analysis"]["user_goal"] == "Fix the app startup bug."
+        assert contract["intent_analysis"]["not_the_goal"] == ["Rewrite the app"]
+        assert contract["files_of_interest"] == ["app.py"]
+        assert "Do not overreach beyond the intent analysis not_the_goal list." in contract["constraints"]
+        assert "Inspect the intent analysis needed_context before editing when applicable." in contract["constraints"]
+        assert "Use the intent analysis success_criteria to decide when to stop." in contract["constraints"]
+
+    def test_intent_scaffold_is_non_fatal_when_model_output_is_invalid(self, monkeypatch, tmp_path):
+        partner = LocalPartner(
+            frontend_model="small",
+            backend_model="small",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            mode="hybrid",
+        )
+        monkeypatch.setattr("local_code.agent.ollama_assess", lambda *args: "not json")
+        original = {"goal": "inspect", "task_kind": "inspection", "edit_policy": "inspect"}
+
+        assert partner._contract_with_intent_scaffold(original) == original
