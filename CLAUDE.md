@@ -32,6 +32,10 @@ This is a **two-model AI coding CLI** backed by Ollama. The key architectural id
 
 When `frontend_model != backend_model`, `LocalPartner._run_backend()` calls `_assess_complexity(contract)` before running the tool loop. The frontend model responds with `{"handle":"self"}` or `{"handle":"escalate","reason":"..."}`. Simple tasks (read-only, single-file, chat) run with the frontend model; complex tasks (multi-file edits, refactoring, bootstrapping) escalate to the backend model via `LocalCodeAgent.run_contract_with_model()`. On any parse failure the default is to escalate (safe fallback). When both models are the same, the assessment call is skipped entirely.
 
+### Intent scaffold
+
+Before `LocalPartner._run_backend()` starts delegated repo work, it runs a compact intent-analysis pass with the frontend model. The pass returns JSON describing the user's actual goal, non-goals, needed context, likely files, risks, and success criteria. `LocalPartner._contract_with_intent_scaffold()` attaches that data to the backend contract as `intent_analysis`, resolves likely files into `files_of_interest`, and adds guardrail constraints so the backend inspects relevant context before editing and avoids overreach. If the intent pass fails or returns invalid JSON, the original contract is used unchanged.
+
 ### Tool loop (`agent.py`)
 
 `LocalCodeAgent.run_contract()` drives the backend loop. Each iteration:

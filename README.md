@@ -73,4 +73,6 @@ To split roles:
 
 ## Architecture
 
+Before delegated repo work starts, `local-code` now runs a compact intent-analysis pass. This asks the model to restate the user's goal, name non-goals, identify context to inspect before editing, and define success criteria. The resulting `intent_analysis` is attached to the backend contract so even smaller local models get a narrower first step before planning or patching.
+
 See [CLAUDE.md](CLAUDE.md) for full architecture notes.
