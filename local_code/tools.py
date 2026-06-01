@@ -33,6 +33,10 @@ PACKAGE_FILES = (
     "src-tauri/Cargo.toml",
     "src-tauri/tauri.conf.json",
     "tauri.conf.json",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "requirements.txt",
 )
 ENTRYPOINTS = (
     "src/main.tsx",
@@ -571,10 +575,73 @@ def build_project_profile(workdir, budget=None):
         add_once("detected_stack", "Next")
         profile["confirmed"].append("Next.js markers found: " + ", ".join(next_markers) + ".")
 
+    python_markers = []
+    py_entry_points = {}
+    py_deps = []
     if (root / "pyproject.toml").exists():
+        python_markers.append("pyproject.toml")
+        try:
+            import tomllib  # Python 3.11+
+            with open(root / "pyproject.toml", "rb") as _f:
+                _toml = tomllib.load(_f)
+        except ImportError:
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+                with open(root / "pyproject.toml", "rb") as _f:
+                    _toml = tomllib.load(_f)
+            except ImportError:
+                _toml = {}
+        except Exception:
+            _toml = {}
+        _proj = _toml.get("project") or {}
+        if _proj.get("name"):
+            profile["project_name"] = profile["project_name"] or _proj["name"]
+            profile["purpose_clues"].append(f"pyproject.toml name: {_proj['name']}")
+        if _proj.get("description"):
+            profile["purpose_clues"].append(f"pyproject.toml description: {_proj['description'][:180]}")
+        py_entry_points = _proj.get("scripts") or (_toml.get("tool", {}).get("poetry", {}).get("scripts") or {})
+        _all_deps = list(_proj.get("dependencies") or [])
+        for _extra in (_proj.get("optional-dependencies") or {}).values():
+            _all_deps.extend(_extra)
+        py_deps = [d.split("[")[0].split(">=")[0].split("==")[0].split(">")[0].strip().lower() for d in _all_deps]
+        if py_entry_points:
+            python_markers.append(f"entry points: {', '.join(list(py_entry_points)[:4])}")
+            for _ep in list(py_entry_points.values())[:4]:
+                _mod = _ep.split(":")[0].replace(".", "/")
+                for _candidate in (f"{_mod}.py", f"{_mod}/__init__.py"):
+                    if (root / _candidate).is_file():
+                        add_once("entrypoints", _candidate)
+                        note_read(_candidate)
+        _web_frameworks = {"flask", "django", "fastapi", "starlette", "aiohttp", "tornado", "bottle", "sanic"}
+        _cli_frameworks = {"click", "typer", "argparse", "rich", "textual", "prompt-toolkit"}
+        _found_web = [f for f in _web_frameworks if f in py_deps]
+        _found_cli = [f for f in _cli_frameworks if f in py_deps]
+        if _found_web:
+            add_once("frontend", "Python web")
+            add_once("detected_stack", "Python web")
+            python_markers.append(f"web framework(s): {', '.join(_found_web)}")
+        if _found_cli or py_entry_points:
+            add_once("backend", "Python CLI")
+            add_once("detected_stack", "Python CLI")
+        _pkg_name = (_proj.get("name") or "").replace("-", "_")
+        _pkg_dir = root / _pkg_name if _pkg_name and (root / _pkg_name).is_dir() else None
+        if _pkg_dir:
+            for _src in sorted(_pkg_dir.glob("*.py"))[:8]:
+                _rel = _src.relative_to(root).as_posix()
+                if _rel not in profile["files_read"]:
+                    text = note_read(_rel)
+                    if text:
+                        signals, capabilities = extract_source_signals(_rel, text)
+                        for s in signals[:6]:
+                            add_once("source_signals", s)
+                        for c in capabilities[:6]:
+                            add_once("capabilities", c)
+    if (root / "setup.py").exists() and not python_markers:
+        python_markers.append("setup.py")
+    if python_markers:
         add_once("backend", "Python")
         add_once("detected_stack", "Python")
-        profile["confirmed"].append("Python project metadata found in pyproject.toml.")
+        profile["confirmed"].append("Python project: " + "; ".join(python_markers) + ".")
     if (root / "Cargo.toml").exists() or (root / "src-tauri/Cargo.toml").exists():
         add_once("backend", "Rust")
         add_once("detected_stack", "Rust")
@@ -592,7 +659,9 @@ def build_project_profile(workdir, budget=None):
         )
 
     profile["confidence"]["tech_stack"] = _confidence_from_counts(len(profile["detected_stack"]))
-    profile["confidence"]["project_type"] = _confidence_from_counts(len(profile["desktop_runtime"]) + len(profile["frontend"]))
+    profile["confidence"]["project_type"] = _confidence_from_counts(
+        len(profile["desktop_runtime"]) + len(profile["frontend"]) + len(profile["backend"])
+    )
     profile["confidence"]["purpose"] = _confidence_from_counts(len(profile["purpose_clues"]) + len(profile["source_signals"]), len(profile["likely"]))
     return profile
 
@@ -604,8 +673,15 @@ def format_project_profile(profile):
     scripts = profile.get("package_scripts") or {}
     script_lines = [f"{name}: {cmd}" for name, cmd in scripts.items()]
     important = []
-    for path in ("package.json", "src/main.tsx", "src/main.ts", "src/App.tsx", "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml"):
+    for path in (
+        "package.json", "pyproject.toml", "setup.py",
+        "src/main.tsx", "src/main.ts", "src/App.tsx",
+        "src-tauri/tauri.conf.json", "src-tauri/Cargo.toml",
+    ):
         if path in profile.get("files_read", []) or path in profile.get("entrypoints", []):
+            important.append(path)
+    for path in profile.get("entrypoints", []):
+        if path not in important:
             important.append(path)
     important.extend(path for path in profile.get("documentation_found", []) if path not in important)
     overview_parts = []

@@ -66,7 +66,7 @@ HELP = """\
 - `/help` — this help    · `/status` — settings    · `/models` — provider & tiers
 - `/mode chat|hybrid|agent` · `/model NAME` · `/frontend NAME` · `/backend NAME`
 - `/ask TEXT` — inspect (no edits) · `/plan TEXT` — propose · `/apply` — apply a proposal
-- `/agent TEXT` — run a task in agent mode · `/clear` — clear history · `/quit` — exit
+- `/agent TEXT` — run a task in agent mode · `/copy` — copy last response · `/clear` — clear history · `/quit` — exit
 
 **Keys**: Enter send · Ctrl+X cancel · Ctrl+L clear · Ctrl+C quit · in a proposal, type `yes` to apply.
 """
