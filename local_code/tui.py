@@ -192,8 +192,28 @@ class LocalCodeApp(App):
             self._write_user(arg)
             self._run_turn(arg, kind="agent")
             return True
+        if cmd == "/copy":
+            self._copy_last_response()
+            return True
         self.query_one("#log", RichLog).write(Text(f"Unknown or incomplete command: {text}", style="yellow"))
         return True
+
+    def _copy_last_response(self) -> None:
+        import subprocess as _sp
+        log = self.query_one("#log", RichLog)
+        history = self.partner.history
+        last = next((m["content"] for m in reversed(history) if m["role"] == "assistant"), None)
+        if not last:
+            log.write(Text("No response to copy yet.", style="yellow"))
+            return
+        for cmd in (["wl-copy"], ["xclip", "-selection", "clipboard"], ["xsel", "--clipboard", "--input"]):
+            try:
+                _sp.run(cmd, input=last.encode(), check=True, timeout=5)
+                log.write(Text(f"Copied ({len(last)} chars).", style="green"))
+                return
+            except (FileNotFoundError, _sp.CalledProcessError, _sp.TimeoutExpired):
+                continue
+        log.write(Text("Copy failed: install wl-copy (Wayland) or xclip/xsel (X11).", style="red"))
 
     def _write_models(self) -> None:
         p = self.partner
