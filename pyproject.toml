@@ -14,8 +14,14 @@ ui = [
     "prompt-toolkit>=3.0",
     "rich>=13.0",
 ]
+tui = [
+    "textual>=0.60",
+    "rich>=13.0",
+]
 dev = [
     "pytest>=8.0",
+    "textual>=0.60",
+    "textual-dev>=1.5",
 ]
 
 [project.scripts]

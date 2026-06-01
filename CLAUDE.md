@@ -24,7 +24,7 @@ python -m local_code.eval --model qwen2.5-coder:7b
 
 ## Architecture
 
-This is a **two-model AI coding CLI** backed by Ollama. The key architectural idea is a frontend/backend split — two locally-running LLMs with distinct roles, coordinated by `LocalPartner`.
+This is a **two-model AI coding CLI** with a full-screen TUI, backed by Ollama or any OpenAI-compatible provider. The key architectural idea is a frontend/backend split — two LLMs with distinct roles, coordinated by `LocalPartner`.
 
 ### Dual-model design
 
@@ -61,6 +61,32 @@ standard is `qwen2.5-coder:7b` (ceiling `qwen2.5-coder:14b`). See `MODELS.md`.
 `cli.run_preflight()` checks Ollama + pulled models and prints the tier advisory
 (also `/models`); it stays silent when everything meets the standard.
 `local_code/eval.py` is a runnable harness that scores tool-loop reliability.
+
+### Providers (`providers.py`)
+
+All model I/O goes through a `Provider` (set on `LocalCodeAgent`/`LocalPartner`
+as `self.provider`). `OllamaProvider` wraps the native client in `models.py`;
+`OpenAICompatibleProvider` speaks the OpenAI `/chat/completions` shape and powers
+OpenRouter, OpenAI, and any compatible endpoint. Both implement
+`chat`/`chat_result`/`chat_tools`/`assess`/`stream` plus capability probes, and
+both enforce structured output (JSON-schema `format` / `response_format`) with
+graceful degradation. `build_provider(kind, base_url, api_key)` constructs one
+from CLI flags (`--provider`, `--base-url`, `--api-key`). The constructors still
+accept `ollama=` for backward compatibility (it builds an `OllamaProvider`), and
+the agent calls go through `self.provider.*`, so `provider.is_local` gates the
+local-only behaviors (VRAM tiering, few-shot).
+
+### TUI (`tui.py`)
+
+The default interactive experience is a full-screen Textual app (`LocalCodeApp`)
+launched by `cli.main()` when stdout is a TTY and Textual is importable; it falls
+back to `interactive_loop` otherwise. It drives the same `LocalPartner` but
+bridges progress through three hooks the agent exposes: `on_token` (streaming),
+`observer(event)` (milestone/tool/transcript events — the agent emits these
+instead of printing to stderr when an observer is attached), and `confirm_hook`
+(replaces the blocking stdin approval with a modal). Model work runs in a
+`@work(thread=True)` worker; all UI updates cross back via `call_from_thread`.
+Headless tests use Textual's `run_test()` Pilot harness.
 
 ### Tool loop (`agent.py`)
 
@@ -113,7 +139,9 @@ Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `de
 | `local_code/tools.py` | All backend tool implementations |
 | `local_code/tool_specs.py` | Canonical backend tool schemas, native tool definitions, and argument validation |
 | `local_code/models.py` | Ollama HTTP client + reliability layer (structured output, retries, `keep_alive`, capability probes) |
+| `local_code/providers.py` | Provider abstraction: `OllamaProvider` + `OpenAICompatibleProvider` (OpenRouter/OpenAI/…) |
 | `local_code/model_profiles.py` | Model capability tiers + recommended-minimum standard (3060 12 GB target) |
+| `local_code/tui.py` | Full-screen Textual TUI (`LocalCodeApp`), the default interactive experience |
 | `local_code/eval.py` | Tool-loop reliability eval harness (`python -m local_code.eval`) |
 | `local_code/config.py` | All defaults, limits, regex patterns, blocked commands |
 | `local_code/cli.py` | REPL, slash commands, at-references, paste handling |

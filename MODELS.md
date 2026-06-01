@@ -78,6 +78,19 @@ These are automatic — you don't configure them:
 | `--no-preflight` | Skip the startup model/Ollama check |
 | `/models` | Show tiers + the standard at any time in the REPL |
 
+## Cloud providers (OpenRouter / OpenAI-compatible)
+
+The tiers above are for **local** models on a 12 GB card. With
+`--provider openrouter` (or any OpenAI-compatible endpoint), the model runs in
+the cloud, so VRAM fit and the few-shot scaffolding don't apply — local-code
+skips them automatically. Structured output, retries, and the tool loop work
+identically. Pick any capable instruct/coder model the provider offers, e.g.:
+
+```bash
+export OPENROUTER_API_KEY=sk-or-...
+local-code --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
+```
+
 ## Measuring a model yourself
 
 The eval harness runs a battery of safe, read-only tasks against a throwaway

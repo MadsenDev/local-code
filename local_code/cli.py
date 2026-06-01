@@ -10,6 +10,7 @@ from .agent import LocalPartner
 from .config import (
     DEFAULT_BACKEND_MODEL,
     DEFAULT_FRONTEND_MODEL,
+    DEFAULT_MODEL,
     DEFAULT_MODE,
     DEFAULT_TOOL_CALLING,
     DEFAULT_OLLAMA,
@@ -24,7 +25,7 @@ from .model_profiles import (
     advisory_lines,
     classify_model,
 )
-from .models import model_is_available, server_available
+from .providers import build_provider
 from .tools import git_summary, list_files, read_file, resolve_path
 from .ui import UI
 
@@ -63,24 +64,33 @@ def parse_args():
     parser.add_argument("--show-raw-actions", action="store_true", help="Show raw JSON actions/contracts in debug mode")
     parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
-    parser.add_argument("--no-preflight", dest="no_preflight", action="store_true", help="Skip the startup model/Ollama check")
+    parser.add_argument("--provider", choices=["ollama", "openrouter", "openai"], default="ollama", help="Model provider (default: ollama)")
+    parser.add_argument("--base-url", dest="base_url", default=None, help="Override the provider base URL (e.g. an OpenAI-compatible server)")
+    parser.add_argument("--api-key", dest="api_key", default=None, help="API key for cloud providers (else read from env)")
+    parser.add_argument("--no-preflight", dest="no_preflight", action="store_true", help="Skip the startup model/provider check")
+    parser.add_argument("--no-tui", dest="no_tui", action="store_true", help="Use the plain line-based REPL instead of the full-screen TUI")
     return parser.parse_args()
 
 
 def run_preflight(agent, verbose=False):
-    """Check Ollama + the configured models and advise on the 12 GB standard.
+    """Check the provider + configured models and advise.
 
-    Always non-fatal. Stays silent when everything is pulled and meets the
-    recommended standard, unless `verbose` (the /models command) is set.
+    Always non-fatal. For local Ollama it advises on the 12 GB standard and
+    stays silent when everything is pulled and meets it (unless `verbose`). For
+    cloud providers it checks the key/connectivity instead of VRAM tiers.
     """
+    if not agent.provider.is_local:
+        _run_preflight_cloud(agent, verbose)
+        return
+
     ui = agent.ui
-    if not server_available(agent.ollama):
+    if not agent.provider.available():
         print(
             ui.box(
                 "Ollama not reachable",
                 [
-                    f"Could not reach Ollama at {agent.ollama}.",
-                    "Start it with `ollama serve`, or point at it with --ollama.",
+                    f"Could not reach {agent.provider.describe()}.",
+                    "Start it with `ollama serve`, or point at it with --ollama / --base-url.",
                 ],
                 color=UI.YELLOW,
             ),
@@ -90,7 +100,7 @@ def run_preflight(agent, verbose=False):
 
     models = list(dict.fromkeys([agent.frontend_model, agent.backend_model]))
     profiles = {m: classify_model(m) for m in models}
-    missing = [m for m in models if model_is_available(agent.ollama, m) is False]
+    missing = [m for m in models if agent.provider.model_available(m) is False]
     below = [m for m, p in profiles.items() if not p.meets_standard]
     advisory = advisory_lines(agent.frontend_model, agent.backend_model)
     dual_warn = any("won't stay resident" in line for line in advisory)
@@ -106,6 +116,28 @@ def run_preflight(agent, verbose=False):
     body.append(f"Standard for 12 GB GPUs: {RECOMMENDED_STANDARD} (ceiling {RECOMMENDED_CEILING}).")
     color = UI.YELLOW if (missing or below or dual_warn) else UI.CYAN
     print(ui.box("Models", body, color=color), file=sys.stderr)
+
+
+def _run_preflight_cloud(agent, verbose):
+    ui = agent.ui
+    provider = agent.provider
+    models = list(dict.fromkeys([agent.frontend_model, agent.backend_model]))
+    if not provider.available():
+        if getattr(provider, "api_key", None):
+            body = [f"Provider: {provider.describe()}", "Could not reach the provider (check --base-url / network)."]
+        else:
+            env = "OPENROUTER_API_KEY" if provider.name == "openrouter" else "OPENAI_API_KEY"
+            body = [f"Provider: {provider.describe()}", f"No API key. Set {env}, or pass --api-key."]
+        print(ui.box("Provider not ready", body, color=UI.YELLOW), file=sys.stderr)
+        return
+    if not verbose:
+        return
+    body = [
+        f"Provider: {provider.describe()}",
+        f"Models: {', '.join(models)}",
+        "Cloud models — local VRAM tiers don't apply; structured output is still enforced.",
+    ]
+    print(ui.box("Models", body, color=UI.CYAN), file=sys.stderr)
 
 
 def render_header(agent):
@@ -129,6 +161,7 @@ def render_status(agent):
         ("Safety", f"edits {agent.edit_permission}, commands {agent.command_permission}"),
         ("Workdir", agent.workdir),
         ("Git", f"{repo}/{branch}, {changes}"),
+        ("Provider", agent.provider.describe()),
         ("Frontend", agent.frontend_model),
         ("Backend", agent.backend_model),
         ("Trace", "on" if agent.verbosity == "debug" else "off"),
@@ -714,15 +747,33 @@ def interactive_loop(agent):
         print_reply(agent, reply)
 
 
+def _default_model_for(provider_kind):
+    # Local Ollama has a sensible default; cloud providers must be told a model.
+    return DEFAULT_MODEL if provider_kind == "ollama" else None
+
+
 def main():
     args = parse_args()
-    frontend_model = args.frontend_model_alias or args.frontend_model or args.model or DEFAULT_FRONTEND_MODEL
-    backend_model = args.backend_model_alias or args.backend_model or args.model or DEFAULT_BACKEND_MODEL
+    explicit_model = args.model or args.frontend_model or args.frontend_model_alias or args.backend_model or args.backend_model_alias
+    if args.provider != "ollama" and not explicit_model:
+        sys.stderr.write(
+            f"--provider {args.provider} needs a model. Pass --model "
+            "(e.g. --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct).\n"
+        )
+        return 2
+
+    default_model = _default_model_for(args.provider)
+    frontend_model = args.frontend_model_alias or args.frontend_model or args.model or default_model or DEFAULT_FRONTEND_MODEL
+    backend_model = args.backend_model_alias or args.backend_model or args.model or default_model or DEFAULT_BACKEND_MODEL
     command_permission = "allow" if args.auto_approve else "ask"
+
+    ollama_base = args.base_url or args.ollama if args.provider == "ollama" else args.base_url
+    provider = build_provider(args.provider, base_url=ollama_base, api_key=args.api_key)
+
     agent = LocalPartner(
         frontend_model=frontend_model,
         backend_model=backend_model,
-        ollama=args.ollama,
+        provider=provider,
         workdir=args.workdir,
         command_permission=command_permission,
         edit_permission="ask",
@@ -741,4 +792,11 @@ def main():
         if card:
             print(card)
         return 0
+    if not args.no_tui and sys.stdin.isatty() and sys.stdout.isatty():
+        try:
+            from .tui import run_tui
+        except Exception:  # noqa: BLE001  (textual not installed)
+            run_tui = None
+        if run_tui is not None:
+            return run_tui(agent)
     return interactive_loop(agent)

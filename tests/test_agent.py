@@ -344,7 +344,7 @@ class TestIntentScaffolding:
             mode="hybrid",
         )
 
-        def fake_assess(ollama, model, messages):
+        def fake_assess(model, messages):
             assert model == "small"
             assert "Intent Analyst" in messages[0]["content"]
             return '''{
@@ -356,7 +356,7 @@ class TestIntentScaffolding:
                 "success_criteria": ["app.py still imports"]
             }'''
 
-        monkeypatch.setattr("local_code.agent.ollama_assess", fake_assess)
+        monkeypatch.setattr(partner.provider, "assess", fake_assess)
 
         contract = partner._contract_with_intent_scaffold(
             {
@@ -386,7 +386,7 @@ class TestIntentScaffolding:
             verbosity="quiet",
             mode="hybrid",
         )
-        monkeypatch.setattr("local_code.agent.ollama_assess", lambda *args: "not json")
+        monkeypatch.setattr(partner.provider, "assess", lambda *args: "not json")
         original = {"goal": "inspect", "task_kind": "inspection", "edit_policy": "inspect"}
 
         assert partner._contract_with_intent_scaffold(original) == original

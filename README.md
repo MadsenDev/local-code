@@ -1,32 +1,47 @@
 # local-code
 
-A local AI coding CLI backed by [Ollama](https://ollama.com). Uses a two-model architecture — a frontend model for conversation/routing and a backend model for repo inspection and edits — though both roles default to the same model.
+A local-first AI coding CLI with a full-screen TUI. Uses a two-model
+architecture — a frontend model for conversation/routing and a backend model
+for repo inspection and edits — though both roles default to the same model. It
+runs against a local [Ollama](https://ollama.com) server or any
+OpenAI-compatible provider (OpenRouter, OpenAI, …).
 
 ## Requirements
 
 - Python 3.11+
-- [Ollama](https://ollama.com) running locally
+- A model provider: [Ollama](https://ollama.com) running locally, **or** an OpenRouter/OpenAI API key
 - `rg` (ripgrep) for file search
 - Optional: `delta` for colored diffs, `fzf` for file picker
 
 ## Setup
 
 ```bash
-pip install -e ".[dev]"
+# Install with the TUI (recommended) and dev tools
+pip install -e ".[tui,dev]"
 ollama pull qwen2.5-coder:7b
 ```
+
+The full-screen TUI is the default interactive experience; if `textual` isn't
+installed or stdout isn't a TTY, it falls back to the plain line-based REPL.
 
 ## Usage
 
 ```bash
-# Default: qwen2.5-coder:7b for both roles (recommended on a 12 GB GPU)
+# Default: full-screen TUI, qwen2.5-coder:7b for both roles (recommended on a 12 GB GPU)
 local-code
+
+# Plain line-based REPL instead of the TUI
+local-code --no-tui
 
 # Override the model for both roles
 local-code --model qwen2.5-coder:14b
 
 # Use different models for frontend and backend (both must fit in VRAM)
 local-code --frontend-model qwen3:4b --backend-model qwen2.5-coder:7b
+
+# Use OpenRouter (any OpenAI-compatible provider works the same way)
+export OPENROUTER_API_KEY=sk-or-...
+local-code --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
 
 # Run a single prompt non-interactively
 local-code --prompt "what does this repo do?"
@@ -49,6 +64,36 @@ local-code --tool-calling auto    # try native tools, then fall back to JSON
 | `chat` | Direct single-model replies, no tool loop |
 | `hybrid` | Auto-delegates code/repo tasks to the backend tool loop |
 | `agent` | All turns go to the backend tool loop |
+
+## TUI
+
+`local-code` opens a full-screen Textual interface by default:
+
+- A scrolling transcript with rendered Markdown replies and `you` / `local-code` panels.
+- **Live token streaming** of the answer as it's generated.
+- **Tool-activity cards** — every repo read, search, command, and edit (with +/− counts) shows up as it happens.
+- **Approval modals** — in execute mode, edits and commands pop a y/n confirmation.
+- A status bar (provider · models · mode · permissions · pending proposal) and slash commands.
+
+Slash commands inside the TUI: `/help`, `/status`, `/models`, `/mode`, `/model`,
+`/frontend`, `/backend`, `/ask`, `/plan`, `/apply`, `/agent`, `/clear`, `/quit`.
+Keys: Enter to send, Ctrl+L to clear, Ctrl+C to quit. Use `--no-tui` for the
+plain REPL (also used automatically when piping or when Textual isn't installed).
+
+## Providers
+
+Models are reached through a provider abstraction, selected with `--provider`:
+
+| Provider | Selection | Key |
+|----------|-----------|-----|
+| Ollama (local, default) | `--provider ollama` (default) | none |
+| OpenRouter | `--provider openrouter --model VENDOR/MODEL` | `OPENROUTER_API_KEY` or `--api-key` |
+| OpenAI / OpenAI-compatible | `--provider openai [--base-url URL] --model MODEL` | `OPENAI_API_KEY` or `--api-key` |
+
+Any OpenAI-compatible endpoint (Together, Groq, a local vLLM/llama.cpp server,
+…) works via `--provider openai --base-url <url>`. The same structured-output
+enforcement, retries, and tool loop apply across all providers. Cloud models
+skip the local VRAM tiering and few-shot scaffolding (they don't need it).
 
 ## Models
 
