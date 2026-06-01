@@ -250,9 +250,10 @@ class LocalCodeAgent:
             - Avoid dist/build output unless no source file exists.
             - Use tools instead of guessing.
             - Read files before editing them.
+            - For improvement, review, or analysis tasks: run repo_overview first to discover all source files, then read the key source files directly (agent.py, cli.py, tools.py, config.py, etc.). Do NOT search for abstract concept strings like "CLI interface" or "configuration system" — those will not match source code. Read the actual files instead.
             - Respect edit_policy:
               - inspect: do not edit files
-              - plan: do not edit files. Read the relevant source files first, then produce a concrete plan. Every plan step must name a real file that exists in the repo, a specific function or section to change, and exactly what the change would be. Generic suggestions without file references are not acceptable.
+              - plan: do not edit files. First run repo_overview to see all files, then read all relevant source files. After reading, produce a concrete plan. Every plan step must name a real file that exists in the repo, a specific function or section to change, and exactly what the change would be. Generic suggestions without file references are not acceptable.
               - propose: do not edit files. Read the relevant source files first, then propose the exact changes that would be made, including file paths and code snippets showing before/after.
               - execute: inspect, then apply the requested changes if justified
             - Respect commands_allowed. Do not try commands outside it when that list is non-empty.
