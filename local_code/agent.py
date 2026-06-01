@@ -1514,7 +1514,10 @@ class LocalPartner:
             source_files = self._collect_source_files()
             if source_files:
                 enriched["files_of_interest"] = source_files
-                guardrails.append("Read ALL files listed in files_of_interest before calling final.")
+                guardrails.append(
+                    "Read each file in files_of_interest at most once, then call final with specific, "
+                    "file-grounded findings. Do not re-read a file you have already read in this session."
+                )
         enriched["constraints"] = guardrails
         return enriched
 
