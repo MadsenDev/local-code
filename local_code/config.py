@@ -1,8 +1,11 @@
 import re
 
-DEFAULT_MODEL = "qwen3:14b"
-DEFAULT_FRONTEND_MODEL = "qwen3:8b"
-DEFAULT_BACKEND_MODEL = "qwen3:14b"
+# Recommended-minimum standard: one shared coder model that fits a 12 GB GPU
+# with full context, drives the tool loop reliably, and skips the cross-model
+# assessment hop. See MODELS.md. Override with --model / --frontend / --backend.
+DEFAULT_MODEL = "qwen2.5-coder:7b"
+DEFAULT_FRONTEND_MODEL = "qwen2.5-coder:7b"
+DEFAULT_BACKEND_MODEL = "qwen2.5-coder:7b"
 DEFAULT_MODE = "hybrid"
 DEFAULT_VERBOSITY = "normal"
 DEFAULT_TOOL_CALLING = "json"
@@ -11,6 +14,24 @@ MAX_TOOL_STEPS = 20
 MAX_OUTPUT_CHARS = 12000
 MAX_HISTORY_MESSAGES = 40
 MEMORY_DIR_NAME = ".local-code"
+
+# --- Model generation / reliability layer -------------------------------
+# Context window requested from Ollama. 16k fits comfortably alongside a
+# 7-8B model on a 12 GB GPU; lower it (LOCAL_CODE_NUM_CTX) for tighter VRAM.
+DEFAULT_NUM_CTX = 16384
+# Short auxiliary passes (assessment, intent, memory) need far less context.
+ASSESS_NUM_CTX = 4096
+# Keep the model resident between calls so role switches don't pay a reload.
+DEFAULT_KEEP_ALIVE = "30m"
+# Deterministic decoding for anything that must return parseable JSON; a
+# little warmth for user-facing prose so replies don't read robotically.
+STRUCTURED_TEMPERATURE = 0.0
+PROSE_TEMPERATURE = 0.7
+# Transient-failure retries (connection resets, 5xx, model still loading).
+MODEL_MAX_RETRIES = 3
+MODEL_RETRY_BACKOFF = 1.5
+# Read timeout (seconds) for a single non-streaming generation.
+MODEL_REQUEST_TIMEOUT = 300
 
 PROMPT_YES_RE = re.compile(r"^(yes|y|approve|apply|go ahead|do it|continue|ship it)\b", re.I)
 CODE_ACTION_RE = re.compile(
@@ -47,6 +68,7 @@ HELP_TEXT = """Commands:
 /apply                        Apply the latest approved or pending plan
 /undo                         Revert files changed by the last execute run
 /status                       Show current settings
+/models                       Show model tiers and the recommended-minimum standard
 /quit                         Exit
 """
 

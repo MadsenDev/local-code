@@ -12,6 +12,7 @@ from pathlib import Path
 from .config import (
     CODE_ACTION_RE,
     DEFAULT_MODE,
+    DEFAULT_OLLAMA,
     DEFAULT_TOOL_CALLING,
     DEFAULT_VERBOSITY,
     EDIT_INTENT_RE,
@@ -19,8 +20,11 @@ from .config import (
     MAX_TOOL_STEPS,
     PROMPT_YES_RE,
     READ_FILE_DEFAULT_END,
+    STRUCTURED_TEMPERATURE,
     TEST_COMMAND_PATTERNS,
 )
+from .model_profiles import classify_model
+from .providers import OllamaProvider
 from .contracts import (
     has_database_context,
     has_pasted_context,
@@ -33,7 +37,6 @@ from .contracts import (
     unwrap_frontend_reply_text,
 )
 from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
-from .models import ollama_assess, ollama_chat, ollama_chat_tools, ollama_stream
 from .permissions import command_is_blocked, confirm_action
 from .tool_specs import native_tool_definitions, tool_prompt_lines, validate_tool_call
 from .tools import (
@@ -61,17 +64,26 @@ class LocalCodeAgent:
     def __init__(
         self,
         model,
-        ollama,
-        workdir,
+        ollama=DEFAULT_OLLAMA,
+        workdir=".",
         command_permission="ask",
         edit_permission="ask",
         max_steps=MAX_TOOL_STEPS,
         verbosity=DEFAULT_VERBOSITY,
         show_raw_actions=False,
         tool_calling=DEFAULT_TOOL_CALLING,
+        provider=None,
+        observer=None,
+        confirm_hook=None,
     ):
         self.model = model
-        self.ollama = ollama.rstrip("/")
+        self.provider = provider or OllamaProvider(ollama)
+        self.ollama = getattr(self.provider, "base_url", ollama)
+        # Optional UI bridges. `observer(event_dict)` receives progress events
+        # (milestones, tool activity); `confirm_hook(kind, label, content)`
+        # replaces the blocking stdin prompt. Both stay None for the plain REPL.
+        self.observer = observer
+        self.confirm_hook = confirm_hook
         self.workdir = str(Path(workdir).resolve())
         self.command_permission = command_permission
         self.edit_permission = edit_permission
@@ -88,27 +100,53 @@ class LocalCodeAgent:
         self.command_prefix_approval_cache = {}
 
     def chat(self, messages):
-        return ollama_chat(self.ollama, self.model, messages)
+        # Every backend self.chat caller wants a single JSON object (tool action
+        # or report), so constrain output to JSON and decode deterministically.
+        # This is the dominant reliability lever for weak local models.
+        return self.provider.chat(self.model, messages, fmt="json", temperature=STRUCTURED_TEMPERATURE)
 
     def chat_tools(self, messages, tools):
-        return ollama_chat_tools(self.ollama, self.model, messages, tools)
+        return self.provider.chat_tools(self.model, messages, tools)
+
+    def model_profile(self):
+        return classify_model(self.model)
+
+    def emit(self, kind, **data):
+        if self.observer is not None:
+            self.observer({"kind": kind, "source": "backend", **data})
 
     def trace_print(self, message):
-        if self.verbosity == "debug":
-            prefix = self.ui.style("backend", UI.BOLD, UI.BLUE)
-            print(f"{prefix} {message}", file=sys.stderr)
+        if self.verbosity != "debug":
+            return
+        if self.observer is not None:
+            self.emit("trace", text=message)
+            return
+        prefix = self.ui.style("backend", UI.BOLD, UI.BLUE)
+        print(f"{prefix} {message}", file=sys.stderr)
 
     def milestone(self, message):
-        if self.verbosity in {"normal", "debug"}:
-            print(self.ui.tool_line(message, color=UI.BLUE), file=sys.stderr)
+        if self.verbosity not in {"normal", "debug"}:
+            return
+        if self.observer is not None:
+            self.emit("milestone", text=message)
+            return
+        print(self.ui.tool_line(message, color=UI.BLUE), file=sys.stderr)
 
     def action_print(self, title, summary, detail=None, footer=None, color=UI.CYAN):
-        if self.verbosity in {"normal", "debug"}:
-            print(self.ui.action_card(title, summary, detail=detail, footer=footer, color=color), file=sys.stderr)
+        if self.verbosity not in {"normal", "debug"}:
+            return
+        if self.observer is not None:
+            self.emit("action", title=title, summary=summary, detail=detail, footer=footer)
+            return
+        print(self.ui.action_card(title, summary, detail=detail, footer=footer, color=color), file=sys.stderr)
 
     def transcript_print(self, title, lines=None, color=UI.CYAN):
-        if self.verbosity in {"normal", "debug"}:
-            print(self.ui.transcript_item(title, lines or [], color=color), file=sys.stderr)
+        if self.verbosity not in {"normal", "debug"}:
+            return
+        if self.observer is not None:
+            self.emit("transcript", title=title, lines=list(lines or []))
+            return
+        print(self.ui.transcript_item(title, lines or [], color=color), file=sys.stderr)
 
     def allowed_tool_names(self, contract):
         if contract.get("read_only") or contract.get("edit_policy") == "inspect":
@@ -160,7 +198,7 @@ class LocalCodeAgent:
             if command in self.command_approval_cache:
                 ok = self.command_approval_cache[command]
                 return ok, "Command not approved by user." if not ok else ""
-            ok = confirm_action("Command", command, "Verify or inspect the current task before continuing.", self.ui)
+            ok = self._confirm("Command", command, "Verify or inspect the current task before continuing.")
             self.command_approval_cache[command] = ok
             for prefix in approval_prefixes or []:
                 if command == prefix or command.startswith(prefix + " "):
@@ -172,9 +210,14 @@ class LocalCodeAgent:
         if self.edit_permission == "deny":
             return False, "File edits are disabled by permission mode."
         if self.edit_permission == "ask":
-            ok = confirm_action("Edit", label, "Modify the file as part of the approved task.", self.ui)
+            ok = self._confirm("Edit", label, "Modify the file as part of the approved task.")
             return ok, "Edit not approved by user." if not ok else ""
         return True, ""
+
+    def _confirm(self, kind, label, content):
+        if self.confirm_hook is not None:
+            return bool(self.confirm_hook(kind, label, content))
+        return confirm_action(kind, label, content, self.ui)
 
     def system_prompt(self, contract, memory_text):
         return textwrap.dedent(
@@ -234,8 +277,39 @@ class LocalCodeAgent:
 
             Allowed tools:
             {self.allowed_tools_text(contract)}
-            """
+            {self.few_shot_block(contract)}"""
         ).strip()
+
+    def few_shot_block(self, contract):
+        """Worked tool-call examples, shown only to weaker models that need them.
+
+        Stronger models follow the schema from the description alone; for
+        best-effort / medium-tier models a couple of concrete examples sharply
+        cut malformed or chatty responses.
+        """
+        if not self.provider.is_local or not self.model_profile().use_few_shot:
+            return ""
+        read_only = contract.get("read_only") or contract.get("edit_policy") == "inspect"
+        examples = [
+            'To read a file:\n{"tool":"read_file","args":{"path":"src/app.py","start":1,"end":120}}',
+            'To search the repo:\n{"tool":"search_files","args":{"query":"def main","path":"."}}',
+        ]
+        if read_only:
+            examples.append(
+                'To finish:\n{"tool":"final","args":{"summary":"app.py defines the entrypoint","findings":["main() in src/app.py:10"],"files_read":["src/app.py"]}}'
+            )
+        else:
+            examples.append(
+                'To edit exact text:\n{"tool":"replace_in_file","args":{"path":"src/app.py","old":"DEBUG = True","new":"DEBUG = False"}}'
+            )
+            examples.append(
+                'To finish:\n{"tool":"final","args":{"summary":"disabled debug flag","files_changed":["src/app.py"],"diff_summary":"git diff --stat output"}}'
+            )
+        return (
+            "\nExamples (respond with exactly one such object, nothing else):\n"
+            + "\n".join(examples)
+            + "\n"
+        )
 
     def direct_report(self, contract, memory_text):
         resolved_hints = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])
@@ -519,10 +593,44 @@ class LocalCodeAgent:
             "preview": preview,
         }
 
+    def tool_transcript_line(self, tool, args, result, elapsed):
+        """Plain-text one-line summary of a tool result (no ANSI), for observers."""
+        display = self.last_tool_display or {}
+        kind = display.get("kind")
+        if kind == "command":
+            return f"Run  {display['command']}  (exit {display['exit_code']}, {elapsed:.1f}s)"
+        if kind == "edit":
+            return f"Edit  {display['path']}  +{display['added']} -{display['removed']}"
+        if kind == "read":
+            return f"Read  {display['path']}:{display['range']}"
+        if kind == "search_web":
+            return f"Search web  {display['query']!r}"
+        if tool == "search_files":
+            matches = 0 if result == "(no matches)" else len([ln for ln in result.splitlines() if ":" in ln])
+            return f"Search  {args.get('query', '')[:40]!r} in {args.get('path', '.')}  ({matches} matches)"
+        if tool == "list_files":
+            count = len([ln for ln in result.splitlines() if ln.strip()])
+            return f"List  {args.get('path', '.')}  ({count} files)"
+        if tool == "repo_overview":
+            return "Overview  repo structure"
+        if tool == "repo_map":
+            return "Map  repo structure"
+        return f"{tool}"
+
     def print_tool_transcript(self, tool, args, result, elapsed):
         if self.verbosity not in {"normal", "debug"}:
             return
         display = self.last_tool_display or {}
+        if self.observer is not None:
+            self.emit(
+                "tool",
+                tool=tool,
+                args=args,
+                display=display,
+                elapsed=elapsed,
+                line=self.tool_transcript_line(tool, args, result, elapsed),
+            )
+            return
         if display.get("kind") == "command":
             cmd = display["command"]
             status = self.ui.style(f"  exit {display['exit_code']} · {elapsed:.1f}s", UI.DIM)
@@ -866,8 +974,8 @@ class LocalPartner:
         self,
         frontend_model,
         backend_model,
-        ollama,
-        workdir,
+        ollama=DEFAULT_OLLAMA,
+        workdir=".",
         command_permission="ask",
         edit_permission="ask",
         max_steps=MAX_TOOL_STEPS,
@@ -875,10 +983,14 @@ class LocalPartner:
         show_raw_actions=False,
         mode=DEFAULT_MODE,
         tool_calling=DEFAULT_TOOL_CALLING,
+        provider=None,
+        observer=None,
+        confirm_hook=None,
     ):
         self.frontend_model = frontend_model
         self.backend_model = backend_model
-        self.ollama = ollama.rstrip("/")
+        self.provider = provider or OllamaProvider(ollama)
+        self.ollama = getattr(self.provider, "base_url", ollama)
         self.workdir = str(Path(workdir).resolve())
         self.command_permission = command_permission
         self.edit_permission = edit_permission
@@ -888,6 +1000,11 @@ class LocalPartner:
         self.mode = mode
         self.tool_calling = tool_calling
         self.ui = UI()
+        self.observer = observer
+        self.confirm_hook = confirm_hook
+        # When a TUI drives streaming via on_token, the partner must not write
+        # to stdout itself (it would corrupt the full-screen app).
+        self.stream_to_stdout = True
         self.pending_plan = None
         self.latest_plan = None
         self.last_report = None
@@ -899,7 +1016,7 @@ class LocalPartner:
         self.history = load_chat_history(self.workdir)
         self.executor = LocalCodeAgent(
             model=self.backend_model,
-            ollama=self.ollama,
+            provider=self.provider,
             workdir=self.workdir,
             command_permission=self.command_permission,
             edit_permission=self.edit_permission,
@@ -907,6 +1024,8 @@ class LocalPartner:
             verbosity=self.verbosity,
             show_raw_actions=self.show_raw_actions,
             tool_calling=self.tool_calling,
+            observer=observer,
+            confirm_hook=confirm_hook,
         )
 
     def _prune_history(self):
@@ -916,40 +1035,58 @@ class LocalPartner:
 
     def sync_executor(self):
         self.executor.model = self.backend_model
+        self.executor.provider = self.provider
         self.executor.command_permission = self.command_permission
         self.executor.edit_permission = self.edit_permission
         self.executor.max_steps = self.max_steps
         self.executor.verbosity = self.verbosity
         self.executor.show_raw_actions = self.show_raw_actions
         self.executor.tool_calling = self.tool_calling
+        self.executor.observer = self.observer
+        self.executor.confirm_hook = self.confirm_hook
+
+    def emit(self, kind, **data):
+        if self.observer is not None:
+            self.observer({"kind": kind, "source": "frontend", **data})
 
     def trace_print(self, message):
-        if self.verbosity == "debug":
-            prefix = self.ui.style("frontend", UI.BOLD, UI.YELLOW)
-            print(f"{prefix} {message}", file=sys.stderr)
+        if self.verbosity != "debug":
+            return
+        if self.observer is not None:
+            self.emit("trace", text=message)
+            return
+        prefix = self.ui.style("frontend", UI.BOLD, UI.YELLOW)
+        print(f"{prefix} {message}", file=sys.stderr)
 
     def milestone(self, message):
-        if self.verbosity in {"normal", "debug"}:
-            print(self.ui.tool_line(message, color=UI.BLUE), file=sys.stderr)
+        if self.verbosity not in {"normal", "debug"}:
+            return
+        if self.observer is not None:
+            self.emit("milestone", text=message)
+            return
+        print(self.ui.tool_line(message, color=UI.BLUE), file=sys.stderr)
 
     def chat(self, model, messages):
-        return ollama_chat(self.ollama, model, messages)
+        return self.provider.chat(model, messages)
+
+    def _emit_stdout(self, text):
+        if self.stream_to_stdout:
+            sys.stdout.write(text)
+            sys.stdout.flush()
 
     def _chat_streaming(self, model, messages):
         """Stream a response via on_token callbacks; return full accumulated text."""
         chunks = []
         first = True
-        for chunk in ollama_stream(self.ollama, model, messages):
+        for chunk in self.provider.stream(model, messages):
             if first:
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                self._emit_stdout("\n")
                 first = False
             self.on_token(chunk)
             chunks.append(chunk)
         full = "".join(chunks)
         if full and not full.endswith("\n"):
-            sys.stdout.write("\n")
-            sys.stdout.flush()
+            self._emit_stdout("\n")
         self.last_streamed = True
         return full.strip()
 
@@ -958,7 +1095,7 @@ class LocalPartner:
         chunks = []
         decided = False
         is_text = False
-        for chunk in ollama_stream(self.ollama, model, messages):
+        for chunk in self.provider.stream(model, messages):
             chunks.append(chunk)
             if not decided:
                 so_far = "".join(chunks).lstrip()
@@ -966,8 +1103,7 @@ class LocalPartner:
                     is_text = not so_far.startswith("{")
                     decided = True
                     if is_text:
-                        sys.stdout.write("\n")
-                        sys.stdout.flush()
+                        self._emit_stdout("\n")
                         for c in chunks:
                             self.on_token(c)
             elif is_text:
@@ -975,8 +1111,7 @@ class LocalPartner:
         full = "".join(chunks)
         if is_text:
             if full and not full.endswith("\n"):
-                sys.stdout.write("\n")
-                sys.stdout.flush()
+                self._emit_stdout("\n")
             self.last_streamed = True
         return full.strip()
 
@@ -1279,7 +1414,7 @@ class LocalPartner:
             {"role": "user", "content": "Task contract:\n" + json.dumps(contract, ensure_ascii=False, indent=2)},
         ]
         try:
-            raw = ollama_assess(self.ollama, self.frontend_model, messages)
+            raw = self.provider.assess(self.frontend_model, messages)
             data = load_json_layers(raw)
         except Exception:  # noqa: BLE001
             return {}
@@ -1357,7 +1492,7 @@ class LocalPartner:
             {"role": "user", "content": json.dumps(contract, ensure_ascii=False)},
         ]
         try:
-            raw = ollama_assess(self.ollama, self.frontend_model, messages)
+            raw = self.provider.assess(self.frontend_model, messages)
             data = load_json_layers(raw)
             if isinstance(data, dict) and data.get("handle") == "self":
                 return "self"
@@ -1403,7 +1538,7 @@ class LocalPartner:
             ),
         }]
         with Spinner(self.ui, self.ui.style("updating memory", UI.DIM)):
-            updated = ollama_chat(self.ollama, self.backend_model, messages)
+            updated = self.provider.chat(self.backend_model, messages)
         updated = updated.strip()
         if updated and updated != current:
             paths["project"].write_text(updated + "\n", encoding="utf-8")
