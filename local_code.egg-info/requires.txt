@@ -1,7 +1,0 @@
-
-[dev]
-pytest>=8.0
-
-[ui]
-prompt-toolkit>=3.0
-rich>=13.0
