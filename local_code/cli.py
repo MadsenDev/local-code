@@ -18,6 +18,13 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
+from .model_profiles import (
+    RECOMMENDED_CEILING,
+    RECOMMENDED_STANDARD,
+    advisory_lines,
+    classify_model,
+)
+from .models import model_is_available, server_available
 from .tools import git_summary, list_files, read_file, resolve_path
 from .ui import UI
 
@@ -56,7 +63,49 @@ def parse_args():
     parser.add_argument("--show-raw-actions", action="store_true", help="Show raw JSON actions/contracts in debug mode")
     parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
+    parser.add_argument("--no-preflight", dest="no_preflight", action="store_true", help="Skip the startup model/Ollama check")
     return parser.parse_args()
+
+
+def run_preflight(agent, verbose=False):
+    """Check Ollama + the configured models and advise on the 12 GB standard.
+
+    Always non-fatal. Stays silent when everything is pulled and meets the
+    recommended standard, unless `verbose` (the /models command) is set.
+    """
+    ui = agent.ui
+    if not server_available(agent.ollama):
+        print(
+            ui.box(
+                "Ollama not reachable",
+                [
+                    f"Could not reach Ollama at {agent.ollama}.",
+                    "Start it with `ollama serve`, or point at it with --ollama.",
+                ],
+                color=UI.YELLOW,
+            ),
+            file=sys.stderr,
+        )
+        return
+
+    models = list(dict.fromkeys([agent.frontend_model, agent.backend_model]))
+    profiles = {m: classify_model(m) for m in models}
+    missing = [m for m in models if model_is_available(agent.ollama, m) is False]
+    below = [m for m, p in profiles.items() if not p.meets_standard]
+    advisory = advisory_lines(agent.frontend_model, agent.backend_model)
+    dual_warn = any("won't stay resident" in line for line in advisory)
+
+    if not verbose and not missing and not below and not dual_warn:
+        return
+
+    body = list(advisory)
+    if missing:
+        body.append("")
+        body.extend(f"⚠ not pulled — run: ollama pull {m}" for m in missing)
+    body.append("")
+    body.append(f"Standard for 12 GB GPUs: {RECOMMENDED_STANDARD} (ceiling {RECOMMENDED_CEILING}).")
+    color = UI.YELLOW if (missing or below or dual_warn) else UI.CYAN
+    print(ui.box("Models", body, color=color), file=sys.stderr)
 
 
 def render_header(agent):
@@ -638,6 +687,9 @@ def interactive_loop(agent):
         if prompt == "/status":
             print(render_status(agent))
             continue
+        if prompt == "/models":
+            run_preflight(agent, verbose=True)
+            continue
         if prompt.startswith("/"):
             print("Unknown command. Type /help.")
             continue
@@ -680,6 +732,8 @@ def main():
         mode=args.mode,
         tool_calling=args.tool_calling,
     )
+    if not args.no_preflight:
+        run_preflight(agent)
     if args.prompt:
         reply = agent.run_turn(args.prompt)
         agent.ui.print_markdown(reply)

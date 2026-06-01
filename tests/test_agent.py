@@ -392,6 +392,33 @@ class TestIntentScaffolding:
         assert partner._contract_with_intent_scaffold(original) == original
 
 
+class TestFewShotByModelTier:
+    def _agent(self, model, tmp_path):
+        return LocalCodeAgent(
+            model=model,
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+        )
+
+    def test_weak_model_gets_few_shot_examples(self, tmp_path):
+        agent = self._agent("qwen3:4b", tmp_path)
+        block = agent.few_shot_block({"edit_policy": "inspect", "read_only": True})
+        assert "Examples" in block
+        assert '"tool":"read_file"' in block
+
+    def test_strong_model_skips_few_shot(self, tmp_path):
+        agent = self._agent("qwen2.5-coder:14b", tmp_path)
+        assert agent.few_shot_block({"edit_policy": "inspect"}) == ""
+
+    def test_system_prompt_includes_examples_for_weak_model(self, tmp_path):
+        agent = self._agent("llama3.2:1b", tmp_path)
+        prompt = agent.system_prompt({"edit_policy": "inspect", "read_only": True}, "")
+        assert "Examples" in prompt
+
+
 class TestToolCalling:
     def test_invalid_tool_arguments_are_retried_before_dispatch(self, monkeypatch, tmp_path):
         agent = LocalCodeAgent(

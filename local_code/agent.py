@@ -19,8 +19,10 @@ from .config import (
     MAX_TOOL_STEPS,
     PROMPT_YES_RE,
     READ_FILE_DEFAULT_END,
+    STRUCTURED_TEMPERATURE,
     TEST_COMMAND_PATTERNS,
 )
+from .model_profiles import classify_model
 from .contracts import (
     has_database_context,
     has_pasted_context,
@@ -88,10 +90,16 @@ class LocalCodeAgent:
         self.command_prefix_approval_cache = {}
 
     def chat(self, messages):
-        return ollama_chat(self.ollama, self.model, messages)
+        # Every backend self.chat caller wants a single JSON object (tool action
+        # or report), so constrain output to JSON and decode deterministically.
+        # This is the dominant reliability lever for weak local models.
+        return ollama_chat(self.ollama, self.model, messages, fmt="json", temperature=STRUCTURED_TEMPERATURE)
 
     def chat_tools(self, messages, tools):
         return ollama_chat_tools(self.ollama, self.model, messages, tools)
+
+    def model_profile(self):
+        return classify_model(self.model)
 
     def trace_print(self, message):
         if self.verbosity == "debug":
@@ -234,8 +242,39 @@ class LocalCodeAgent:
 
             Allowed tools:
             {self.allowed_tools_text(contract)}
-            """
+            {self.few_shot_block(contract)}"""
         ).strip()
+
+    def few_shot_block(self, contract):
+        """Worked tool-call examples, shown only to weaker models that need them.
+
+        Stronger models follow the schema from the description alone; for
+        best-effort / medium-tier models a couple of concrete examples sharply
+        cut malformed or chatty responses.
+        """
+        if not self.model_profile().use_few_shot:
+            return ""
+        read_only = contract.get("read_only") or contract.get("edit_policy") == "inspect"
+        examples = [
+            'To read a file:\n{"tool":"read_file","args":{"path":"src/app.py","start":1,"end":120}}',
+            'To search the repo:\n{"tool":"search_files","args":{"query":"def main","path":"."}}',
+        ]
+        if read_only:
+            examples.append(
+                'To finish:\n{"tool":"final","args":{"summary":"app.py defines the entrypoint","findings":["main() in src/app.py:10"],"files_read":["src/app.py"]}}'
+            )
+        else:
+            examples.append(
+                'To edit exact text:\n{"tool":"replace_in_file","args":{"path":"src/app.py","old":"DEBUG = True","new":"DEBUG = False"}}'
+            )
+            examples.append(
+                'To finish:\n{"tool":"final","args":{"summary":"disabled debug flag","files_changed":["src/app.py"],"diff_summary":"git diff --stat output"}}'
+            )
+        return (
+            "\nExamples (respond with exactly one such object, nothing else):\n"
+            + "\n".join(examples)
+            + "\n"
+        )
 
     def direct_report(self, contract, memory_text):
         resolved_hints = resolve_repo_file_hints(self.workdir, contract.get("files_of_interest") or [])

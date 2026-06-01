@@ -13,20 +13,20 @@ A local AI coding CLI backed by [Ollama](https://ollama.com). Uses a two-model a
 
 ```bash
 pip install -e ".[dev]"
-ollama pull qwen3:14b
+ollama pull qwen2.5-coder:7b
 ```
 
 ## Usage
 
 ```bash
-# Default: qwen3:14b for both roles
+# Default: qwen2.5-coder:7b for both roles (recommended on a 12 GB GPU)
 local-code
 
 # Override the model for both roles
-local-code --model qwen3:8b
+local-code --model qwen2.5-coder:14b
 
-# Use different models for frontend and backend
-local-code --frontend-model gemma3:12b --backend-model qwen2.5-coder:14b
+# Use different models for frontend and backend (both must fit in VRAM)
+local-code --frontend-model qwen3:4b --backend-model qwen2.5-coder:7b
 
 # Run a single prompt non-interactively
 local-code --prompt "what does this repo do?"
@@ -52,14 +52,37 @@ local-code --tool-calling auto    # try native tools, then fall back to JSON
 
 ## Models
 
-The default model is `qwen3:14b` for both roles. It handles reasoning, code generation, and tool use well.
+The **recommended minimum standard** is `qwen2.5-coder:7b` for both roles — the
+sweet spot for a 12 GB GPU (full 16k context, fast, reliable tool calls).
+`qwen2.5-coder:14b` is the highest-quality model a 12 GB card can host.
 
-To run lighter:
-- `--model qwen3:8b` — faster, less memory
-- `--model qwen3:4b` — minimal hardware
+```bash
+local-code --model qwen2.5-coder:7b   # recommended, single shared model
+local-code --model qwen2.5-coder:14b  # best quality on a 12 GB card
+```
 
-To split roles:
-- `--frontend-model gemma3:12b --backend-model qwen2.5-coder:14b` — original dual-model config
+Lighter (best-effort — fine for chat/inspection, flaky on multi-file edits):
+- `--model qwen3:4b`
+- `--model llama3.2:3b`
+
+Splitting roles only helps if **both models fit in VRAM together** (otherwise
+every role switch reloads weights). On a 12 GB card:
+- `--frontend-model qwen3:4b --backend-model qwen2.5-coder:7b` — both stay resident
+
+`local-code` checks your models at startup and warns about anything below the
+standard, not pulled, or too large for the card. Run `/models` any time to see
+tiers, or `python -m local_code.eval --model NAME` to measure a model's
+tool-loop reliability. **See [MODELS.md](MODELS.md) for the full standard,
+tiers, and tuning knobs (`LOCAL_CODE_NUM_CTX`, `LOCAL_CODE_KEEP_ALIVE`).**
+
+### Reliability on weak models
+
+Calls that must return JSON (tool actions, complexity assessment, intent
+analysis) are sent to Ollama with a JSON-schema `format` constraint at
+temperature 0, so decoding is grammar-constrained — this near-eliminates
+malformed tool JSON, the dominant failure mode on small models. Weaker models
+also get a few worked tool-call examples in the prompt. Transient Ollama errors
+are retried with backoff, and the model is kept resident via `keep_alive`.
 
 ## Slash commands
 
@@ -72,6 +95,7 @@ To split roles:
 /apply         Apply a pending proposal
 /ask TEXT      Inspect without editing
 /files         Pick a file with fzf
+/models        Show model tiers and the recommended-minimum standard
 /status        Show current config
 /clear         Clear chat history
 /quit          Exit
