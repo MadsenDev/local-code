@@ -11,6 +11,7 @@ from .config import (
     DEFAULT_BACKEND_MODEL,
     DEFAULT_FRONTEND_MODEL,
     DEFAULT_MODE,
+    DEFAULT_TOOL_CALLING,
     DEFAULT_OLLAMA,
     DEFAULT_VERBOSITY,
     HELP_TEXT,
@@ -53,6 +54,7 @@ def parse_args():
     parser.add_argument("--max-steps", type=int, default=MAX_TOOL_STEPS, help=f"Maximum tool steps per backend turn ({MAX_TOOL_STEPS})")
     parser.add_argument("--verbosity", choices=["quiet", "normal", "debug"], default=DEFAULT_VERBOSITY, help=f"Output level ({DEFAULT_VERBOSITY})")
     parser.add_argument("--show-raw-actions", action="store_true", help="Show raw JSON actions/contracts in debug mode")
+    parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
     return parser.parse_args()
 
@@ -82,6 +84,7 @@ def render_status(agent):
         ("Backend", agent.backend_model),
         ("Trace", "on" if agent.verbosity == "debug" else "off"),
         ("Raw JSON", "on" if agent.show_raw_actions else "off"),
+        ("Tool calling", agent.tool_calling),
         ("Pending plan", "yes" if agent.pending_plan else "no"),
     ]
     return agent.ui.kv_box("local-code status", rows, color=UI.CYAN)
@@ -487,6 +490,14 @@ def interactive_loop(agent):
             else:
                 print("Use /trace on or /trace off")
             continue
+        if prompt.startswith("/tools "):
+            value = prompt.split(None, 1)[1].strip().lower()
+            if value in {"json", "native", "auto"}:
+                agent.tool_calling = value
+                print(f"Tool calling: {agent.tool_calling}")
+            else:
+                print("Use /tools json, /tools native, or /tools auto")
+            continue
         if prompt.startswith("/raw "):
             value = prompt.split(None, 1)[1].strip().lower()
             if value in {"on", "off"}:
@@ -667,6 +678,7 @@ def main():
         verbosity=args.verbosity,
         show_raw_actions=args.show_raw_actions,
         mode=args.mode,
+        tool_calling=args.tool_calling,
     )
     if args.prompt:
         reply = agent.run_turn(args.prompt)

@@ -390,3 +390,71 @@ class TestIntentScaffolding:
         original = {"goal": "inspect", "task_kind": "inspection", "edit_policy": "inspect"}
 
         assert partner._contract_with_intent_scaffold(original) == original
+
+
+class TestToolCalling:
+    def test_invalid_tool_arguments_are_retried_before_dispatch(self, monkeypatch, tmp_path):
+        agent = LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            max_steps=2,
+            verbosity="quiet",
+        )
+        calls = {"count": 0, "messages": []}
+
+        def fake_chat(messages):
+            calls["count"] += 1
+            calls["messages"] = list(messages)
+            if calls["count"] == 1:
+                return '{"tool":"read_file","args":{"start":1}}'
+            return '{"tool":"final","args":{"summary":"validated","findings":[]}}'
+
+        monkeypatch.setattr(agent, "chat", fake_chat)
+
+        report = agent.run_contract({"goal": "inspect", "edit_policy": "inspect", "read_only": True}, "")
+
+        assert report["summary"] == "validated"
+        recovery_prompt = calls["messages"][-1]["content"]
+        assert "missing required argument" in recovery_prompt
+        assert "read_file" in recovery_prompt
+
+    def test_native_tool_call_is_normalized(self, tmp_path):
+        agent = LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+        )
+
+        action = agent.action_from_native_tool_calls(
+            [{"function": {"name": "read_file", "arguments": '{"path":"README.md","start":1}'}}]
+        )
+
+        assert action == {"tool": "read_file", "args": {"path": "README.md", "start": 1}}
+
+    def test_auto_tool_calling_falls_back_to_json_protocol(self, monkeypatch, tmp_path):
+        agent = LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            tool_calling="auto",
+        )
+
+        class Result:
+            content = ""
+            tool_calls = []
+
+        monkeypatch.setattr(agent, "chat_tools", lambda messages, tools: Result())
+        monkeypatch.setattr(agent, "chat", lambda messages: '{"tool":"final","args":{"summary":"fallback"}}')
+
+        action, _ = agent.request_action([{"role": "system", "content": "test"}], {"edit_policy": "inspect"})
+
+        assert action == {"tool": "final", "args": {"summary": "fallback"}}
