@@ -22,7 +22,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Header, Input, Label, RichLog, Static
+from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
 
 class ConfirmScreen(ModalScreen[bool]):
@@ -75,12 +75,11 @@ HELP = """\
 class LocalCodeApp(App):
     CSS = """
     Screen { layout: vertical; }
-    #status { dock: top; height: 1; padding: 0 1; background: $panel; color: $text-muted; }
-    #log { padding: 0 1; }
+    #status { height: 1; padding: 0 1; background: $panel; color: $text-muted; }
+    #log { height: 1fr; padding: 0 1; }
     #live { padding: 0 1; color: $text; }
     #live.empty { display: none; }
-    #prompt { dock: bottom; }
-    #prompt Input { border: tall $accent; }
+    #input { border: tall $accent; }
     ConfirmScreen { align: center middle; }
     #confirm-box { width: 80; height: auto; padding: 1 2; border: thick $warning; background: $surface; }
     #confirm-title { text-style: bold; color: $warning; }
@@ -102,12 +101,10 @@ class LocalCodeApp(App):
 
     # -- layout ---------------------------------------------------------
     def compose(self) -> ComposeResult:
-        yield Header(show_clock=True)
         yield Static(self._status_text(), id="status")
         yield RichLog(id="log", wrap=True, markup=True, highlight=False)
         yield Static("", id="live", classes="empty")
-        with Vertical(id="prompt"):
-            yield Input(placeholder="Ask, or /help …", id="input")
+        yield Input(placeholder="Ask, or /help …", id="input")
         yield Footer()
 
     def on_mount(self) -> None:
