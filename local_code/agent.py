@@ -371,9 +371,13 @@ class LocalCodeAgent:
             report["files_read"] = [str(resolve_path(self.workdir, p)) for p in (contract.get("files_of_interest") or [])[:3]]
         if contract.get("edit_policy") in {"plan", "propose"}:
             report["needs_approval"] = True
+        files_read = report.get("files_read") or []
+        direct_lines = [summarize_text(report.get("summary", ""), 220)] if report.get("summary") else []
+        if files_read:
+            direct_lines.append("read: " + ", ".join(Path(f).name for f in files_read))
         self.transcript_print(
-            f"Inspected repo ({len(report.get('files_read') or [])} file(s) read)",
-            [summarize_text(report.get("summary", ""), 220)] if report.get("summary") else [],
+            f"Inspected repo ({len(files_read)} file(s) read)",
+            direct_lines,
             color=UI.BLUE,
         )
         return report
@@ -873,7 +877,12 @@ class LocalCodeAgent:
                     report["risks"].append("Missing expected artifacts: " + ", ".join(missing))
                 elif contract.get("verification_checks") and contract.get("task_kind") == "bootstrap_new" and "verified" not in report["summary"].lower():
                     report["summary"] = report["summary"].rstrip(".") + ". Verified expected project files."
-                self.transcript_print("Finished backend report", [summarize_text(report.get("summary", "Backend finished."), 220)], color=UI.GREEN)
+                files_read = report.get("files_read") or []
+                read_label = f"Finished backend report ({len(files_read)} file(s) read)"
+                detail_lines = [summarize_text(report.get("summary", "Backend finished."), 220)]
+                if files_read:
+                    detail_lines.append("read: " + ", ".join(Path(f).name for f in files_read))
+                self.transcript_print(read_label, detail_lines, color=UI.GREEN)
                 return report
 
             tool_started = time.monotonic()
