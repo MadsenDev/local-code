@@ -1685,7 +1685,7 @@ class LocalPartner:
         self.milestone("mode: read-only inspection")
         self.milestone("allowed tools: repo_map, repo_overview, list_files, search_files, read_file")
         report = self.executor.project_profile_report(contract)
-        reply = report["summary"]
+        reply = self.frontend_finalize(user_prompt, report)
         self.last_report = report
         self.last_status = "completed"
         self.history.append({"role": "user", "content": user_prompt})

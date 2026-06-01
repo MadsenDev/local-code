@@ -208,7 +208,7 @@ class TestRoutingAndFailures:
         assert seen["contract"]["task_kind"] == "inspection"
         assert seen["contract"]["edit_policy"] == "inspect"
 
-    def test_project_discovery_uses_deterministic_read_only_profile(self, tmp_path):
+    def test_project_discovery_uses_deterministic_read_only_profile(self, monkeypatch, tmp_path):
         (tmp_path / "package.json").write_text(
             '{"name":"desktop-tool","scripts":{"dev":"vite","tauri":"tauri dev"},"dependencies":{"@tauri-apps/api":"1.0.0","react":"18.0.0","react-dom":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}',
             encoding="utf-8",
@@ -227,6 +227,9 @@ class TestRoutingAndFailures:
             verbosity="quiet",
             mode="hybrid",
         )
+        # frontend_finalize makes an LLM call; stub it to return the structured summary so
+        # the test can verify the heuristic profile was built correctly without a live model.
+        monkeypatch.setattr(partner, "frontend_finalize", lambda prompt, report, **kw: report["summary"])
 
         reply = partner.run_turn("Without making edits, what can you tell me about this project?")
 
