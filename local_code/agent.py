@@ -96,6 +96,7 @@ class LocalCodeAgent:
         self.last_backend_action = None
         self.last_backend_action_signature = None
         self.repeated_backend_action_count = 0
+        self._action_seen_counts: dict = {}
         self.command_approval_cache = {}
         self.command_prefix_approval_cache = {}
 
@@ -681,6 +682,7 @@ class LocalCodeAgent:
         self.last_backend_action = None
         self.last_backend_action_signature = None
         self.repeated_backend_action_count = 0
+        self._action_seen_counts: dict = {}
         invalid_action_count = 0
 
         for step in range(1, self.max_steps + 1):
@@ -820,6 +822,7 @@ class LocalCodeAgent:
             else:
                 self.repeated_backend_action_count = 0
             self.last_backend_action_signature = signature
+            self._action_seen_counts[signature] = self._action_seen_counts.get(signature, 0) + 1
             if self.show_raw_actions and self.verbosity == "debug":
                 self.trace_print("raw action: " + json.dumps(action, ensure_ascii=False))
             messages.append({"role": "assistant", "content": json.dumps(action)})
@@ -862,7 +865,11 @@ class LocalCodeAgent:
             tool_elapsed = time.monotonic() - tool_started
             self.print_tool_transcript(tool, args, result, tool_elapsed)
             messages.append({"role": "user", "content": f"Tool result for {tool}:\n{result}"})
-            if self.repeated_backend_action_count >= 2 and tool != "final":
+            cycle_detected = (
+                self._action_seen_counts.get(signature, 0) >= 3
+                or self.repeated_backend_action_count >= 2
+            )
+            if cycle_detected and tool != "final":
                 self.transcript_print(
                     "Stopped backend loop",
                     [f"Repeated {summarize_action(tool, args)} without new information."],
