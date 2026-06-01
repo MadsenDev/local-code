@@ -35,6 +35,11 @@ local-code --prompt "what does this repo do?"
 local-code --mode chat      # conversational only
 local-code --mode hybrid    # auto-delegate code tasks (default)
 local-code --mode agent     # always delegate to backend
+
+# Choose backend tool protocol
+local-code --tool-calling json    # prompt-emitted JSON protocol (default)
+local-code --tool-calling native  # require Ollama native tool calls
+local-code --tool-calling auto    # try native tools, then fall back to JSON
 ```
 
 ## Modes
@@ -62,6 +67,7 @@ To split roles:
 /help          Show all commands
 /mode NAME     Switch mode: chat, hybrid, agent
 /model NAME    Set both models
+/tools MODE    Switch backend tool protocol: json, native, auto
 /plan TEXT     Propose changes without applying
 /apply         Apply a pending proposal
 /ask TEXT      Inspect without editing
@@ -74,5 +80,7 @@ To split roles:
 ## Architecture
 
 Before delegated repo work starts, `local-code` now runs a compact intent-analysis pass. This asks the model to restate the user's goal, name non-goals, identify context to inspect before editing, and define success criteria. The resulting `intent_analysis` is attached to the backend contract so even smaller local models get a narrower first step before planning or patching.
+
+Backend tools are defined once in a canonical registry and rendered into both the legacy JSON prompt protocol and Ollama/OpenAI-style function schemas. The default remains `--tool-calling json` for broad local-model compatibility; `native` requires structured tool calls, and `auto` tries native tool calls before falling back to JSON. Tool calls are validated against the registry before dispatch in all modes.
 
 See [CLAUDE.md](CLAUDE.md) for full architecture notes.

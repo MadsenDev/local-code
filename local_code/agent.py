@@ -12,6 +12,7 @@ from pathlib import Path
 from .config import (
     CODE_ACTION_RE,
     DEFAULT_MODE,
+    DEFAULT_TOOL_CALLING,
     DEFAULT_VERBOSITY,
     EDIT_INTENT_RE,
     MAX_HISTORY_MESSAGES,
@@ -32,8 +33,9 @@ from .contracts import (
     unwrap_frontend_reply_text,
 )
 from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
-from .models import ollama_assess, ollama_chat, ollama_stream
+from .models import ollama_assess, ollama_chat, ollama_chat_tools, ollama_stream
 from .permissions import command_is_blocked, confirm_action
+from .tool_specs import native_tool_definitions, tool_prompt_lines, validate_tool_call
 from .tools import (
     fetch_url,
     build_project_profile,
@@ -66,6 +68,7 @@ class LocalCodeAgent:
         max_steps=MAX_TOOL_STEPS,
         verbosity=DEFAULT_VERBOSITY,
         show_raw_actions=False,
+        tool_calling=DEFAULT_TOOL_CALLING,
     ):
         self.model = model
         self.ollama = ollama.rstrip("/")
@@ -75,6 +78,7 @@ class LocalCodeAgent:
         self.max_steps = max_steps
         self.verbosity = verbosity
         self.show_raw_actions = show_raw_actions
+        self.tool_calling = tool_calling
         self.ui = UI()
         self.last_tool_display = None
         self.last_backend_action = None
@@ -85,6 +89,9 @@ class LocalCodeAgent:
 
     def chat(self, messages):
         return ollama_chat(self.ollama, self.model, messages)
+
+    def chat_tools(self, messages, tools):
+        return ollama_chat_tools(self.ollama, self.model, messages, tools)
 
     def trace_print(self, message):
         if self.verbosity == "debug":
@@ -130,38 +137,10 @@ class LocalCodeAgent:
         }
 
     def allowed_tools_text(self, contract):
-        specs = {
-            "search_web": '- search_web: {"query":"search terms","max_results":5}',
-            "fetch_url": '- fetch_url: {"url":"https://..."}',
-            "repo_map": '- repo_map: {}',
-            "repo_overview": '- repo_overview: {}',
-            "list_files": '- list_files: {"path":"optional path"}',
-            "search_files": '- search_files: {"query":"text or regex","path":"optional path"}',
-            "read_file": '- read_file: {"path":"file path","start":1,"end":500}',
-            "run_command": '- run_command: {"command":"shell command","timeout":30}',
-            "write_file": '- write_file: {"path":"file path","content":"full file content"}',
-            "replace_lines": '- replace_lines: {"path":"file path","start":10,"end":15,"content":"replacement lines"}',
-            "replace_in_file": '- replace_in_file: {"path":"file path","old":"exact old text","new":"replacement text","count":1}',
-            "insert_after": '- insert_after: {"path":"file path","anchor":"exact anchor text","content":"text to insert","occurrence":1}',
-            "final": '- final: {"summary":"...","findings":[...],"files_read":[...],"files_changed":[...],"diff_summary":"...","commands_run":[...],"tests_run":[...],"risks":[...],"needs_approval":false,"plan":[...]}',
-        }
-        allowed = self.allowed_tool_names(contract)
-        order = [
-            "search_web",
-            "fetch_url",
-            "repo_map",
-            "repo_overview",
-            "list_files",
-            "search_files",
-            "read_file",
-            "run_command",
-            "write_file",
-            "replace_lines",
-            "replace_in_file",
-            "insert_after",
-            "final",
-        ]
-        return "\n".join(specs[name] for name in order if name in allowed)
+        return tool_prompt_lines(self.allowed_tool_names(contract))
+
+    def native_tools(self, contract):
+        return native_tool_definitions(self.allowed_tool_names(contract))
 
     def allow_command(self, command, allowed_commands, approval_prefixes=None):
         if allowed_commands:
@@ -360,6 +339,47 @@ class LocalCodeAgent:
         if isinstance(data, dict) and "tool" in data and "args" in data:
             return data
         raise ValueError(f"Backend did not return a valid tool JSON object:\n{text}")
+
+    def request_action(self, messages, contract):
+        if self.tool_calling in {"native", "auto"}:
+            try:
+                result = self.chat_tools(messages, self.native_tools(contract))
+                action = self.action_from_native_tool_calls(result.tool_calls)
+                if action:
+                    return action, result.content
+                if self.tool_calling == "native":
+                    raise ValueError("Native tool calling did not return a tool call.")
+                if result.content:
+                    self.trace_print("native tool call absent; falling back to JSON content")
+                    return self.parse_action(result.content), result.content
+            except TimeoutError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                if self.tool_calling == "native":
+                    raise
+                self.trace_print(f"native tool calling unavailable; falling back to JSON protocol: {exc}")
+        raw = self.chat(messages)
+        return self.parse_action(raw), raw
+
+    def action_from_native_tool_calls(self, tool_calls):
+        if not tool_calls:
+            return None
+        call = tool_calls[0]
+        function = call.get("function") if isinstance(call, dict) else None
+        if function is None and isinstance(call, dict):
+            function = call
+        if not isinstance(function, dict):
+            raise ValueError("Native tool call did not include a function object.")
+        name = function.get("name")
+        args = function.get("arguments") or {}
+        if isinstance(args, str):
+            parsed = load_json_layers(args)
+            args = parsed if isinstance(parsed, dict) else {}
+        if not isinstance(name, str) or not name:
+            raise ValueError("Native tool call did not include a tool name.")
+        if not isinstance(args, dict):
+            raise ValueError("Native tool call arguments must be an object.")
+        return {"tool": name, "args": args}
 
     def tool_result(self, tool, args, contract, tracker):
         self.last_tool_display = None
@@ -560,14 +580,15 @@ class LocalCodeAgent:
             spinner_label = f"step {step}/{self.max_steps}"
             if intent and step == 1:
                 spinner_label += f"  ·  {intent}"
+            action_error = None
             with Spinner(self.ui, self.ui.style(spinner_label, UI.DIM)):
                 chat_started = time.monotonic()
                 try:
-                    raw = self.chat(messages)
+                    action, raw = self.request_action(messages, contract)
                 except TimeoutError:
                     if step == 1:
                         try:
-                            raw = self.chat(messages)
+                            action, raw = self.request_action(messages, contract)
                         except TimeoutError:
                             return normalize_backend_report(
                                 {
@@ -578,6 +599,8 @@ class LocalCodeAgent:
                                     "risks": ["Backend model timeout; task context was preserved for retry."],
                                 }
                             )
+                        except Exception as exc:  # noqa: BLE001
+                            action_error = exc
                     else:
                         return normalize_backend_report(
                             {
@@ -588,10 +611,11 @@ class LocalCodeAgent:
                                 "risks": ["Backend model timeout; task context was preserved for retry."],
                             }
                         )
+                except Exception as exc:  # noqa: BLE001
+                    action_error = exc
                 chat_elapsed = time.monotonic() - chat_started
-            try:
-                action = self.parse_action(raw)
-            except Exception as exc:  # noqa: BLE001
+            if action_error is not None:
+                exc = action_error
                 invalid_action_count += 1
                 self.trace_print(f"invalid backend action after {chat_elapsed:.1f}s; asking it to retry")
                 messages.append(
@@ -649,6 +673,35 @@ class LocalCodeAgent:
                             "files_changed": sorted(tracker["files_changed"]),
                             "needs_approval": False,
                             "risks": ["Backend produced invalid actions repeatedly before making progress."],
+                        }
+                    )
+                continue
+            try:
+                args = validate_tool_call(tool, args, self.allowed_tool_names(contract))
+                action["args"] = args
+            except Exception as exc:  # noqa: BLE001
+                invalid_action_count += 1
+                self.trace_print(f"invalid backend tool arguments for {tool!r}; asking it to retry")
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": self.invalid_action_hint(contract, step, exc, invalid_action_count, tracker),
+                    }
+                )
+                if invalid_action_count >= 4:
+                    self.transcript_print(
+                        "Stopped backend loop",
+                        ["Backend did not produce valid tool arguments after repeated retries."],
+                        color=UI.YELLOW,
+                    )
+                    return normalize_backend_report(
+                        {
+                            "summary": "Stopped because the backend failed to produce valid tool arguments.",
+                            "commands_run": tracker["commands_run"],
+                            "files_read": sorted(tracker["files_read"]),
+                            "files_changed": sorted(tracker["files_changed"]),
+                            "needs_approval": False,
+                            "risks": ["Backend produced invalid tool arguments repeatedly before making progress."],
                         }
                     )
                 continue
@@ -821,6 +874,7 @@ class LocalPartner:
         verbosity=DEFAULT_VERBOSITY,
         show_raw_actions=False,
         mode=DEFAULT_MODE,
+        tool_calling=DEFAULT_TOOL_CALLING,
     ):
         self.frontend_model = frontend_model
         self.backend_model = backend_model
@@ -832,6 +886,7 @@ class LocalPartner:
         self.verbosity = verbosity
         self.show_raw_actions = show_raw_actions
         self.mode = mode
+        self.tool_calling = tool_calling
         self.ui = UI()
         self.pending_plan = None
         self.latest_plan = None
@@ -851,6 +906,7 @@ class LocalPartner:
             max_steps=self.max_steps,
             verbosity=self.verbosity,
             show_raw_actions=self.show_raw_actions,
+            tool_calling=self.tool_calling,
         )
 
     def _prune_history(self):
@@ -865,6 +921,7 @@ class LocalPartner:
         self.executor.max_steps = self.max_steps
         self.executor.verbosity = self.verbosity
         self.executor.show_raw_actions = self.show_raw_actions
+        self.executor.tool_calling = self.tool_calling
 
     def trace_print(self, message):
         if self.verbosity == "debug":

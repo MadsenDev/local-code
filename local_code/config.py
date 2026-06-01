@@ -5,6 +5,7 @@ DEFAULT_FRONTEND_MODEL = "qwen3:8b"
 DEFAULT_BACKEND_MODEL = "qwen3:14b"
 DEFAULT_MODE = "hybrid"
 DEFAULT_VERBOSITY = "normal"
+DEFAULT_TOOL_CALLING = "json"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 MAX_TOOL_STEPS = 20
 MAX_OUTPUT_CHARS = 12000
@@ -35,6 +36,7 @@ HELP_TEXT = """Commands:
 /verbosity LEVEL              Set output level: quiet, normal, debug
 /trace on|off                 Alias. on => debug, off => normal
 /raw on|off                   Show or hide raw JSON actions/contracts in debug mode
+/tools MODE                    Set backend tool calling: json, native, auto
 /paste                        Paste multi-line context; finish with /end
 /ask TEXT                     Ask/explain without applying edits
 /plan TEXT                    Create a plan/proposal for a task without applying edits

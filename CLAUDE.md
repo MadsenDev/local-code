@@ -40,10 +40,12 @@ Before `LocalPartner._run_backend()` starts delegated repo work, it runs a compa
 
 `LocalCodeAgent.run_contract()` drives the backend loop. Each iteration:
 1. Calls Ollama with the backend system prompt + message history
-2. Parses the response with `parse_action()` (handles JSON with markdown fences, nested strings, garbage prefix/suffix)
-3. Dispatches to `tool_result()` which executes the tool and returns a string
-4. Appends `{"role":"assistant","content":...}` and `{"role":"user","content":"Tool result for X:\n..."}` to messages
-5. Exits on `tool == "final"`, step limit, or repeated action detection
+2. Requests a tool action via the configured backend tool protocol (`json`, `native`, or `auto`)
+3. Parses fallback JSON with `parse_action()` when needed (handles JSON with markdown fences, nested strings, garbage prefix/suffix)
+4. Validates the tool name and arguments against the canonical registry in `tool_specs.py`
+5. Dispatches to `tool_result()` which executes the tool and returns a string
+6. Appends `{"role":"assistant","content":...}` and `{"role":"user","content":"Tool result for X:\n..."}` to messages
+7. Exits on `tool == "final"`, step limit, or repeated action detection
 
 ### Contracts (`contracts.py`)
 
@@ -74,7 +76,7 @@ Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `de
 
 ### Tools available to the backend
 
-`search_web`, `fetch_url`, `repo_overview`, `list_files`, `search_files`, `read_file`, `run_command`, `write_file`, `replace_in_file`, `replace_lines`, `insert_after`, `final`. File ops use ripgrep (`rg`). All paths are validated by `resolve_path()` to stay within workdir. `search_web` uses DuckDuckGo Lite (no API key); `fetch_url` fetches a specific URL.
+`search_web`, `fetch_url`, `repo_overview`, `list_files`, `search_files`, `read_file`, `run_command`, `write_file`, `replace_in_file`, `replace_lines`, `insert_after`, `final`. The canonical schemas live in `local_code/tool_specs.py`, which also renders prompt-JSON examples and Ollama/OpenAI-style native tool definitions. File ops use ripgrep (`rg`). All paths are validated by `resolve_path()` to stay within workdir. `search_web` uses DuckDuckGo Lite (no API key); `fetch_url` fetches a specific URL.
 
 ### Key files
 
@@ -83,6 +85,7 @@ Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `de
 | `local_code/agent.py` | `LocalCodeAgent` (backend loop) + `LocalPartner` (orchestration) |
 | `local_code/contracts.py` | Contract normalization, report parsing, JSON utilities |
 | `local_code/tools.py` | All backend tool implementations |
+| `local_code/tool_specs.py` | Canonical backend tool schemas, native tool definitions, and argument validation |
 | `local_code/models.py` | Ollama HTTP client (`ollama_chat`) |
 | `local_code/config.py` | All defaults, limits, regex patterns, blocked commands |
 | `local_code/cli.py` | REPL, slash commands, at-references, paste handling |
