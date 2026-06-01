@@ -4,6 +4,7 @@ import re
 import subprocess
 import sys
 import textwrap
+import threading
 import time
 import urllib.error
 from datetime import datetime
@@ -97,6 +98,7 @@ class LocalCodeAgent:
         self.last_backend_action_signature = None
         self.repeated_backend_action_count = 0
         self._action_seen_counts: dict = {}
+        self.cancel_event = threading.Event()
         self.command_approval_cache = {}
         self.command_prefix_approval_cache = {}
 
@@ -684,11 +686,24 @@ class LocalCodeAgent:
         self.last_backend_action_signature = None
         self.repeated_backend_action_count = 0
         self._action_seen_counts: dict = {}
+        self.cancel_event.clear()
         invalid_action_count = 0
 
         for step in range(1, self.max_steps + 1):
+            if self.cancel_event.is_set():
+                self.transcript_print("Cancelled", ["User cancelled the backend loop."], color=UI.YELLOW)
+                return normalize_backend_report(
+                    {
+                        "summary": "Cancelled by user.",
+                        "commands_run": tracker["commands_run"],
+                        "files_read": sorted(tracker["files_read"]),
+                        "files_changed": sorted(tracker["files_changed"]),
+                        "needs_approval": False,
+                        "risks": [],
+                    }
+                )
             intent = self.print_step_intent(step, contract, messages)
-            spinner_label = f"step {step}/{self.max_steps}"
+            spinner_label = f"step {step}"
             if intent and step == 1:
                 spinner_label += f"  ·  {intent}"
             action_error = None

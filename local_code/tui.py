@@ -68,7 +68,7 @@ HELP = """\
 - `/ask TEXT` — inspect (no edits) · `/plan TEXT` — propose · `/apply` — apply a proposal
 - `/agent TEXT` — run a task in agent mode · `/clear` — clear history · `/quit` — exit
 
-**Keys**: Enter send · Ctrl+L clear · Ctrl+C quit · in a proposal, type `yes` to apply.
+**Keys**: Enter send · Ctrl+X cancel · Ctrl+L clear · Ctrl+C quit · in a proposal, type `yes` to apply.
 """
 
 
@@ -91,6 +91,7 @@ class LocalCodeApp(App):
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("ctrl+l", "clear_log", "Clear"),
+        Binding("ctrl+x", "cancel_turn", "Cancel", show=True),
     ]
 
     def __init__(self, partner):
@@ -325,6 +326,11 @@ class LocalCodeApp(App):
     # -- actions --------------------------------------------------------
     def action_clear_log(self) -> None:
         self.query_one("#log", RichLog).clear()
+
+    def action_cancel_turn(self) -> None:
+        if self._busy:
+            self.partner.executor.cancel_event.set()
+            self.query_one("#log", RichLog).write(Text("Cancelling…", style="yellow"))
 
 
 def run_tui(partner) -> int:
