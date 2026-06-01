@@ -1454,6 +1454,31 @@ class LocalPartner:
         }
         return {key: value for key, value in analysis.items() if value}
 
+    def _collect_source_files(self):
+        """Return repo-relative paths for the primary source files, excluding cache/test dirs."""
+        root = Path(self.workdir)
+        skip = {".git", "__pycache__", ".venv", "venv", "node_modules", ".pytest_cache", "dist", "build", "*.egg-info"}
+        results = []
+        for p in sorted(root.rglob("*.py")):
+            if any(part in skip or part.endswith(".egg-info") for part in p.parts):
+                continue
+            results.append(p.relative_to(root).as_posix())
+        for ext in ("*.ts", "*.tsx", "*.js", "*.jsx"):
+            for p in sorted(root.rglob(ext)):
+                if any(part in skip for part in p.parts):
+                    continue
+                results.append(p.relative_to(root).as_posix())
+        return results[:20]
+
+    _BROAD_REVIEW_RE = re.compile(
+        r"\b(read\s+(through|all|everything|the\s+whole|every\s+file)|"
+        r"review\s+(everything|all|the\s+whole|every\s+file)|"
+        r"look\s+(through|at)\s+(everything|all\s+(the\s+)?files)|"
+        r"go\s+through\s+(everything|all)|"
+        r"read\s+(?:it|them)\s+all\b)",
+        re.IGNORECASE,
+    )
+
     def _contract_with_intent_scaffold(self, contract):
         if contract.get("intent_analysis"):
             return contract
@@ -1478,6 +1503,18 @@ class LocalPartner:
             guardrails.append("Inspect the intent analysis needed_context before editing when applicable.")
         if analysis.get("success_criteria"):
             guardrails.append("Use the intent analysis success_criteria to decide when to stop.")
+        # For broad review/read-everything tasks, pre-populate with all source files so the weak
+        # backend model gets an explicit list to work through rather than stopping after 3 files.
+        task_text = str(contract.get("task") or "")
+        is_broad_review = (
+            self._BROAD_REVIEW_RE.search(task_text)
+            or (contract.get("scope") == "broad" and contract.get("edit_policy") in {"inspect", "plan", "propose"})
+        )
+        if is_broad_review and len(enriched.get("files_of_interest") or []) < 4:
+            source_files = self._collect_source_files()
+            if source_files:
+                enriched["files_of_interest"] = source_files
+                guardrails.append("Read ALL files listed in files_of_interest before calling final.")
         enriched["constraints"] = guardrails
         return enriched
 
