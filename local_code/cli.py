@@ -4,6 +4,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 
 from .agent import LocalPartner
@@ -21,12 +22,16 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
-from .llamacpp import format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
+from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
 from .llama_runtime import (
     install_llama_server,
     install_model,
     list_managed_models,
+    log_path as managed_log_path,
+    prepare_server_start,
+    recent_log_lines,
     register_model,
+    remove_model,
     server_status,
     start_server,
     stop_server,
@@ -69,7 +74,7 @@ def parse_args():
     parser.add_argument(
         "llama_action",
         nargs="?",
-        choices=["doctor", "command", "install", "start", "stop", "status", "list", "register"],
+        choices=["doctor", "command", "install", "start", "stop", "status", "list", "register", "logs", "remove"],
         help="llama.cpp or managed-model action",
     )
     parser.add_argument("model_target", nargs="?", help="Managed model profile, e.g. qwen36")
@@ -92,12 +97,17 @@ def parse_args():
     parser.add_argument("--long-context", action="store_true", help="Include an optional long-context benchmark prompt")
     parser.add_argument("--profile", default="qwen36-35b-a3b", help="llama.cpp command profile")
     parser.add_argument("--gpu", default="rtx3060", help="llama.cpp hardware profile")
-    parser.add_argument("--model-path", default=None, help="GGUF path to print in the suggested llama-server command")
+    parser.add_argument("--model-path", "--path", dest="model_path", default=None, help="GGUF path to print in the suggested llama-server command")
     parser.add_argument("--url", default=None, help="Explicit URL for a model GGUF or prebuilt llama-server binary")
     parser.add_argument("--sha256", default=None, help="Expected SHA-256 for a downloaded artifact")
     parser.add_argument("--filename", default=None, help="Destination filename for a downloaded GGUF")
     parser.add_argument("--destination", default=None, help="Destination path for a downloaded llama-server binary")
-    parser.add_argument("--force", action="store_true", help="Replace an existing downloaded artifact")
+    parser.add_argument("--force", action="store_true", help="Replace an artifact or stop a running model before removal")
+    parser.add_argument("--dry-run", action="store_true", help="Resolve and print model start details without launching a process")
+    parser.add_argument("--delete-file", action="store_true", help="Delete a registered GGUF when removing a model")
+    parser.add_argument("--yes", action="store_true", help="Confirm destructive model file deletion")
+    parser.add_argument("--tail", type=int, default=100, help="Number of managed llama.cpp log lines to show (100)")
+    parser.add_argument("--follow", action="store_true", help="Continue streaming appended managed llama.cpp log output")
     parser.add_argument("--llama-server", dest="llama_server", default=None, help="Path to the external llama-server executable")
     parser.add_argument("--host", default="127.0.0.1", help="Host for a managed llama-server (127.0.0.1)")
     parser.add_argument("--port", type=int, default=8080, help="Port for a managed llama-server (8080)")
@@ -846,19 +856,72 @@ def _print_runtime_report(report, json_output=False):
     if json_output:
         print(to_json(report))
         return
-    state = report.get("state")
-    if state:
-        print(f"llama.cpp server: {state}")
+    if not report.get("managed") and report.get("state") == "stopped":
+        print("No managed llama.cpp server is currently running.")
+        print(f"Log: {report.get('log_path', managed_log_path())}")
+        return
+    print("Managed llama.cpp runtime:")
+    print(f"Status: {report.get('state', 'unknown')}")
     for key, label in (
-        ("profile", "Profile"), ("pid", "PID"), ("base_url", "Provider"),
-        ("model_path", "Model"), ("executable", "Executable"),
-        ("context", "Context"), ("gpu", "GPU profile"), ("log_path", "Log"), ("message", "Message"),
+        ("profile", "Model"), ("pid", "PID"), ("port", "Port"), ("base_url", "Base URL"),
+        ("log_path", "Log"), ("started_at", "Started"), ("model_path", "Model path"),
+        ("executable", "Executable"), ("context", "Context"), ("gpu", "GPU profile"), ("message", "Message"),
     ):
         if report.get(key) is not None:
             print(f"{label}: {report[key]}")
-    health = report.get("health") or {}
-    if health.get("models"):
+    health = report.get("health")
+    health_state = "reachable" if health and health.get("ready") else "unreachable" if health else "not checked"
+    print(f"Health: {health_state}")
+    if health and health.get("models"):
         print("Reported models: " + ", ".join(health["models"]))
+
+
+def _show_managed_logs(tail=100, follow=False):
+    if tail < 0:
+        raise ValueError("--tail must be zero or greater.")
+    path = managed_log_path()
+    try:
+        if not path.exists():
+            print("No managed llama.cpp server log has been created yet.")
+            print("local-code only knows about logs for servers started with `local-code model start`.")
+            return 0
+        lines = recent_log_lines(tail, path)
+        for line in lines:
+            print(line, end="" if line.endswith("\n") else "\n")
+        if not follow:
+            if not lines and path.stat().st_size == 0:
+                print("The managed llama.cpp server log is empty.")
+            return 0
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            handle.seek(0, 2)
+            while True:
+                line = handle.readline()
+                if line:
+                    print(line, end="", flush=True)
+                else:
+                    time.sleep(0.2)
+    except KeyboardInterrupt:
+        return 0
+    except OSError as exc:
+        print(f"Unable to read the managed llama.cpp server log at {path}: {exc}")
+        print("If llama-server was started manually, local-code does not know where its logs are stored.")
+        return 0
+
+
+def _print_dry_run(report, json_output=False):
+    if json_output:
+        print(to_json({"dry_run": True, **report}))
+        return
+    print("Dry run: llama.cpp managed server")
+    for label, key in (
+        ("Executable", "executable"), ("Model", "model_path"), ("Port", "port"),
+        ("Base URL", "base_url"), ("Command", "command"), ("Log", "log_path"), ("State", "state_path"),
+    ):
+        print()
+        print(f"{label}:")
+        print(report[key])
+    print()
+    print("No process started.")
 
 
 def _handle_runtime_command(args):
@@ -873,6 +936,8 @@ def _handle_runtime_command(args):
             print(f"Installed llama-server: {report['executable']}")
             print(f"SHA-256: {report['sha256']}")
         return 0
+    if args.command == "llama" and action == "logs":
+        return _show_managed_logs(args.tail, args.follow)
     if args.command != "model":
         return None
     if action == "list":
@@ -920,6 +985,29 @@ def _handle_runtime_command(args):
         report = register_model(target, args.model_path)
         print(to_json(report) if args.json_output else f"Registered {report['profile']}: {report['path']}")
         return 0
+    if action == "remove":
+        registered = next((item for item in list_managed_models() if item["id"] == get_llamacpp_profile(target)["id"]), None)
+        if not registered:
+            raise ValueError(f"Model {target!r} is not registered.")
+        confirmed = args.yes
+        if args.delete_file and not confirmed:
+            answer = input(f"Delete registered GGUF {registered['path']}? [y/N] ").strip().lower()
+            confirmed = answer in {"y", "yes"}
+            if not confirmed:
+                print("Removal cancelled; the registry and model file were not changed.")
+                return 1
+        report = remove_model(target, delete_file=args.delete_file, confirmed=confirmed, force=args.force)
+        if args.json_output:
+            print(to_json(report))
+        else:
+            print(f"Unregistered {report['id']}.")
+            if report["file_deleted"]:
+                print(f"Deleted model file: {report['path']}")
+            elif report["file_missing"]:
+                print(f"The registered model file was already missing: {report['path']}")
+            else:
+                print(f"Model file was kept: {report['path']}")
+        return 0
     if action == "start":
         if not args.json_output:
             profile = get_llamacpp_profile(target)
@@ -929,6 +1017,25 @@ def _handle_runtime_command(args):
             print("Provider: llama.cpp")
             print(f"Port: {args.port}")
             print(f"GPU: {gpu_name}")
+            requirements = profile["hardware"]
+            system_ram = getattr(detected, "system_ram_gb", None)
+            max_vram = getattr(detected, "max_vram_gb", None)
+            if system_ram is not None and system_ram < requirements["recommended_ram_gb"]:
+                print(f"Warning: detected RAM ({system_ram} GB) is below the profile recommendation ({requirements['recommended_ram_gb']} GB).")
+            if max_vram is not None and max_vram < requirements["recommended_vram_gb"]:
+                print(f"Warning: detected VRAM ({max_vram} GB) is below the profile recommendation ({requirements['recommended_vram_gb']} GB).")
+            settings = LLAMACPP_GPU_PROFILES.get(args.gpu, {})
+            if settings.get("context", 0) > 32768 and (max_vram or 0) <= 12:
+                print("Warning: context above 32768 on a 12 GB-or-smaller GPU is experimental.")
+            if profile.get("role") == "heavy_backend":
+                print("Warning: large MoE/heavy profiles are experimental; avoid frequent dual-model switching.")
+        if args.dry_run:
+            report = prepare_server_start(
+                target, args.gpu, model_path=args.model_path, executable=args.llama_server,
+                host=args.host, port=args.port,
+            )
+            _print_dry_run(report, args.json_output)
+            return 0
         report = start_server(
             target,
             args.gpu,
@@ -939,19 +1046,19 @@ def _handle_runtime_command(args):
             wait_timeout=args.wait_timeout,
         )
         _print_runtime_report(report, args.json_output)
-        return 0 if report["state"] == "ready" else 1
-    raise ValueError("Model action must be one of: install, register, start, stop, status, list.")
+        return 0 if report["state"] in {"running", "ready"} else 1
+    raise ValueError("Model action must be one of: install, register, start, stop, status, list, remove.")
 
 
 def main():
     args = parse_args()
-    if args.command == "model" or (args.command == "llama" and args.llama_action == "install"):
+    if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs"}):
         try:
             return _handle_runtime_command(args)
         except ValueError as exc:
             sys.stderr.write(f"{exc}\n")
             return 2
-        except (FileNotFoundError, FileExistsError, RuntimeError, urllib.error.URLError) as exc:
+        except (FileNotFoundError, FileExistsError, PermissionError, RuntimeError, KeyError, urllib.error.URLError) as exc:
             sys.stderr.write(f"{exc}\n")
             return 1
     if args.command == "llama" and args.llama_action == "command":

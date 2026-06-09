@@ -1,4 +1,4 @@
-from local_code.diagnostics import benchmark_model, doctor_report, format_benchmark
+from local_code.diagnostics import benchmark_model, doctor_report, format_benchmark, format_doctor
 from local_code.providers import ChatResult
 
 
@@ -57,3 +57,64 @@ def test_benchmark_includes_small_and_medium_latency():
     report = benchmark_model(FakeProvider(), "model", runs=1, long_context=True)
     assert set(report["cases"]) == {"small", "medium", "long_context"}
     assert set(report["suitability"]) == {"normal_chat", "coding_edits", "repo_analysis", "heavy_reasoning"}
+
+
+def test_llamacpp_doctor_formats_separate_sections_and_chat_latency(monkeypatch):
+    monkeypatch.setattr("local_code.diagnostics.server_status", lambda: {
+        "state": "running", "managed": True, "state_file_present": True, "pid_running": True,
+        "pid": 22, "executable": "/bin/llama-server", "model_path": "/missing/model.gguf", "log_path": "/tmp/server.log",
+    })
+    report = doctor_report(FakeLlamaProvider(), "local", "local")
+    output = format_doctor(report)
+    assert "Managed runtime:" in output
+    assert "HTTP provider:" in output
+    assert "Chat completion:" in output
+    assert "Configuration:" in output
+    assert "model path: /missing/model.gguf (missing)" in output
+    assert report["chat_latency_s"] is not None
+
+
+def test_llamacpp_doctor_reports_stale_and_unreachable(monkeypatch):
+    class Unreachable(FakeLlamaProvider):
+        def available(self):
+            return False
+
+    monkeypatch.setattr("local_code.diagnostics.server_status", lambda: {
+        "state": "stale", "managed": True, "state_file_present": True, "pid_running": False,
+        "pid": 99, "log_path": "/tmp/server.log",
+    })
+    output = format_doctor(doctor_report(Unreachable(), "wrong-model", "wrong-model"))
+    assert "status: stale" in output
+    assert "base URL reachable: no" in output
+    assert "local-code llama logs --tail 50" in output
+    assert "stale PID/state detected" in output
+
+
+def test_llamacpp_doctor_distinguishes_models_from_chat_failure(monkeypatch):
+    class BrokenChat(FakeLlamaProvider):
+        def chat_result(self, *args, **kwargs):
+            raise RuntimeError("template failure")
+
+    monkeypatch.setattr("local_code.diagnostics.server_status", lambda: {"state": "stopped", "managed": False, "state_file_present": False})
+    output = format_doctor(doctor_report(BrokenChat(), "local", "local"))
+    assert "/v1/models: responded" in output
+    assert "tiny test prompt: failed" in output
+    assert "models endpoint works, but chat completions fail" in output
+
+
+def test_llamacpp_doctor_reports_stopped_runtime(monkeypatch):
+    monkeypatch.setattr("local_code.diagnostics.server_status", lambda: {
+        "state": "stopped", "managed": False, "state_file_present": False, "log_path": "/tmp/server.log",
+    })
+    output = format_doctor(doctor_report(FakeLlamaProvider(), "local", "local"))
+    assert "status: stopped" in output
+    assert "state file: missing" in output
+
+
+def test_llamacpp_doctor_reports_model_misconfiguration(monkeypatch):
+    monkeypatch.setattr("local_code.diagnostics.server_status", lambda: {
+        "state": "running", "managed": True, "state_file_present": True, "pid_running": True,
+    })
+    report = doctor_report(FakeLlamaProvider(), "wrong", "wrong")
+    assert report["readiness"] == "misconfigured"
+    assert "readiness: misconfigured" in format_doctor(report)

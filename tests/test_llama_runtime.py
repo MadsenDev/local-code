@@ -82,7 +82,7 @@ def test_start_records_external_process_and_waits_for_health(tmp_path, monkeypat
     monkeypatch.setattr(runtime, "probe_server", lambda base_url, timeout=2: {"ready": True, "models": ["local"]})
 
     report = runtime.start_server("qwen36", "rtx3060", model_path=str(model), executable=str(binary))
-    assert report["state"] == "ready"
+    assert report["state"] == "running"
     assert report["pid"] == 4321
     assert calls["args"][0] == str(binary.resolve())
     assert calls["kwargs"]["start_new_session"] is True
@@ -105,4 +105,138 @@ def test_status_removes_stale_state(tmp_path, monkeypatch):
     monkeypatch.setattr(runtime, "_pid_alive", lambda pid: False)
     report = runtime.server_status()
     assert report["state"] == "stale"
-    assert not runtime.state_path().exists()
+    assert runtime.state_path().exists()
+
+
+def test_recent_logs_handles_missing_empty_and_tail(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
+    assert runtime.recent_log_lines(100) == []
+    runtime.log_path().parent.mkdir(parents=True)
+    runtime.log_path().write_text("", encoding="utf-8")
+    assert runtime.recent_log_lines(100) == []
+    runtime.log_path().write_text("one\ntwo\nthree\n", encoding="utf-8")
+    assert runtime.recent_log_lines(2) == ["two\n", "three\n"]
+
+
+def test_prepare_server_start_is_dry_and_matches_start_arguments(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
+    binary = tmp_path / "llama-server"
+    binary.write_text("binary", encoding="utf-8")
+    binary.chmod(0o755)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    called = False
+
+    def forbidden_popen(*args, **kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("dry-run launched a process")
+
+    monkeypatch.setattr(runtime.subprocess, "Popen", forbidden_popen)
+    report = runtime.prepare_server_start("qwen36", "rtx3060", model_path=str(model), executable=str(binary), port=9000)
+    assert report["args"][0] == str(binary.resolve())
+    assert report["args"][report["args"].index("--port") + 1] == "9000"
+    assert called is False
+
+
+def test_start_failure_includes_recent_log_and_original_exit(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
+    binary = tmp_path / "llama-server"
+    binary.write_text("binary", encoding="utf-8")
+    binary.chmod(0o755)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+
+    class Process:
+        pid = 44
+        returncode = 9
+        def poll(self):
+            runtime.log_path().write_text("cudaMalloc failed: out of memory\n", encoding="utf-8")
+            return 9
+
+    monkeypatch.setattr(runtime, "server_status", lambda: {"state": "stopped", "managed": False})
+    monkeypatch.setattr(runtime, "_port_available", lambda host, port: True)
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: Process())
+    with pytest.raises(RuntimeError) as raised:
+        runtime.start_server("qwen36", "rtx3060", model_path=str(model), executable=str(binary))
+    message = str(raised.value)
+    assert "exited with code 9" in message
+    assert "cudaMalloc failed" in message
+    assert "lower quantization" in message
+
+
+def test_health_timeout_includes_recent_log(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
+    binary = tmp_path / "llama-server"
+    binary.write_text("binary", encoding="utf-8")
+    binary.chmod(0o755)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+
+    class Process:
+        pid = 45
+        returncode = None
+        def poll(self):
+            runtime.log_path().write_text("still loading model\n", encoding="utf-8")
+            return None
+
+    monkeypatch.setattr(runtime, "server_status", lambda: {"state": "stopped", "managed": False})
+    monkeypatch.setattr(runtime, "_port_available", lambda host, port: True)
+    monkeypatch.setattr(runtime.subprocess, "Popen", lambda *a, **k: Process())
+    monkeypatch.setattr(runtime, "probe_server", lambda *a, **k: {"ready": False, "error": "connection refused"})
+    monkeypatch.setattr(runtime.time, "sleep", lambda value: None)
+    with pytest.raises(RuntimeError) as raised:
+        runtime.start_server("qwen36", "rtx3060", model_path=str(model), executable=str(binary), wait_timeout=0)
+    assert "failed to become healthy" in str(raised.value)
+    assert "still loading model" in str(raised.value)
+
+
+def test_remove_model_unregister_delete_missing_and_running_guard(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    runtime.register_model("qwen36", str(model))
+    monkeypatch.setattr(runtime, "server_status", lambda: {"state": "stopped", "managed": False})
+    kept = runtime.remove_model("qwen36")
+    assert kept["unregistered"] and model.exists()
+
+    runtime.register_model("qwen36", str(model))
+    monkeypatch.setattr(runtime, "server_status", lambda: {"state": "running", "managed": True, "profile": runtime.model_key("qwen36")})
+    with pytest.raises(RuntimeError, match="running"):
+        runtime.remove_model("qwen36", delete_file=True, confirmed=True)
+
+    monkeypatch.setattr(runtime, "server_status", lambda: {"state": "stopped", "managed": False})
+    deleted = runtime.remove_model("qwen36", delete_file=True, confirmed=True)
+    assert deleted["file_deleted"] and not model.exists()
+
+    missing = tmp_path / "missing.gguf"
+    registry = {runtime.model_key("qwen36"): {"profile": runtime.model_key("qwen36"), "path": str(missing)}}
+    runtime._save_registry(registry)
+    report = runtime.remove_model("qwen36", delete_file=True, confirmed=True)
+    assert report["file_missing"] and report["unregistered"]
+
+
+def test_validation_rejects_bad_port_and_non_gguf(tmp_path, monkeypatch):
+    with pytest.raises(ValueError, match="between 1 and 65535"):
+        runtime.validate_port(70000)
+    monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
+    binary = tmp_path / "llama-server"
+    binary.write_text("binary", encoding="utf-8")
+    binary.chmod(0o755)
+    model = tmp_path / "model.bin"
+    model.write_bytes(b"model")
+    with pytest.raises(ValueError, match=".gguf"):
+        runtime.prepare_server_start("qwen36", "rtx3060", model_path=str(model), executable=str(binary))
+
+
+def test_generated_numeric_settings_must_be_positive(monkeypatch, tmp_path):
+    binary = tmp_path / "llama-server"
+    binary.write_text("binary", encoding="utf-8")
+    binary.chmod(0o755)
+    model = tmp_path / "model.gguf"
+    model.write_bytes(b"model")
+    monkeypatch.setattr(runtime, "generate_llama_server_args", lambda *a, **k: [
+        str(binary), "-m", str(model), "-c", "0", "-t", "8", "-b", "1", "-ub", "1", "--host", "127.0.0.1", "--port", "8080",
+    ])
+    with pytest.raises(ValueError, match="context must be greater than zero"):
+        runtime.prepare_server_start("qwen36", "rtx3060", model_path=str(model), executable=str(binary))

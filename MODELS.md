@@ -133,3 +133,30 @@ python -m local_code.eval --model qwen3:4b --runs 3
 It prints the model's tier, a reliability percentage, and a verdict. A model at
 **≥95%** meets the standard; **75–95%** is usable but not flawless; **<75%** will
 fail often and is below the bar.
+
+## Managed llama.cpp workflow on RTX 3060-class hardware
+
+llama.cpp is external software and performs all GGUF loading and inference.
+local-code can register a GGUF and manage a `llama-server` process for
+convenience, but it does not parse the model or perform inference itself.
+
+```bash
+local-code llama install --url https://example.invalid/llama-server
+local-code model register qwen36 --path ~/Models/qwen.gguf --provider llamacpp
+local-code model start qwen36 --gpu rtx3060
+local-code llama doctor
+local-code bench --provider llamacpp --model local
+local-code llama logs --tail 50
+local-code model stop qwen36
+```
+
+Managed logs and state live in `~/.local-code/runtimes/llamacpp/`. To run
+manually instead, launch `llama-server` yourself and invoke local-code with
+`--provider llamacpp --base-url http://127.0.0.1:8080/v1 --model local`.
+local-code only has log visibility for servers it starts.
+
+For an RTX 3060 12 GB, begin with the conservative 16k-context `rtx3060`
+profile. Context above 32k is experimental on 12 GB VRAM, and large MoE GGUFs
+may also need substantial system RAM and CPU offload. Do not alternate
+frequently between a large llama.cpp backend and another GPU-resident model on
+8–12 GB cards: repeated eviction and reloads can dominate request latency.
