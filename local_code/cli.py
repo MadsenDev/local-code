@@ -12,6 +12,8 @@ from .config import (
     DEFAULT_FRONTEND_MODEL,
     DEFAULT_MODEL,
     DEFAULT_MODE,
+    DEFAULT_MODEL_ROUTING,
+    DEFAULT_NUM_CTX,
     DEFAULT_TOOL_CALLING,
     DEFAULT_OLLAMA,
     DEFAULT_VERBOSITY,
@@ -19,6 +21,9 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
+from .diagnostics import benchmark_model, doctor_report, format_benchmark, format_doctor, to_json
+from .hardware import detect_hardware
+from .routing import resolve_model_routing
 from .model_profiles import (
     RECOMMENDED_CEILING,
     RECOMMENDED_STANDARD,
@@ -49,7 +54,8 @@ except Exception:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Local coding partner CLI backed by Ollama.")
+    parser = argparse.ArgumentParser(description="Local-first coding agent with hardware-aware model routing.")
+    parser.add_argument("command", nargs="?", choices=["doctor", "benchmark"], help="Run diagnostics or a local inference benchmark")
     parser.add_argument("-m", "--model", default=None, help=f"Model name override for both roles (default: role-specific)")
     parser.add_argument("--frontend-model", dest="frontend_model", default=None, help="Frontend/talker model name (falls back to --model)")
     parser.add_argument("--backend-model", dest="backend_model", default=None, help="Backend/coder model name (falls back to --model)")
@@ -64,6 +70,9 @@ def parse_args():
     parser.add_argument("--show-raw-actions", action="store_true", help="Show raw JSON actions/contracts in debug mode")
     parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
+    parser.add_argument("--model-routing", choices=["single", "adaptive", "dual"], default=DEFAULT_MODEL_ROUTING, help=f"Model residency/routing strategy ({DEFAULT_MODEL_ROUTING})")
+    parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs (3)")
+    parser.add_argument("--json", dest="json_output", action="store_true", help="Emit doctor/benchmark output as JSON")
     parser.add_argument("--provider", choices=["ollama", "openrouter", "openai"], default="ollama", help="Model provider (default: ollama)")
     parser.add_argument("--base-url", dest="base_url", default=None, help="Override the provider base URL (e.g. an OpenAI-compatible server)")
     parser.add_argument("--api-key", dest="api_key", default=None, help="API key for cloud providers (else read from env)")
@@ -164,10 +173,12 @@ def render_status(agent):
         ("Provider", agent.provider.describe()),
         ("Frontend", agent.frontend_model),
         ("Backend", agent.backend_model),
+        ("Model routing", f"{agent.routing_decision.get('mode', agent.model_routing)} (requested: {agent.model_routing})"),
         ("Trace", "on" if agent.verbosity == "debug" else "off"),
         ("Raw JSON", "on" if agent.show_raw_actions else "off"),
         ("Tool calling", agent.tool_calling),
         ("Pending plan", "yes" if agent.pending_plan else "no"),
+        ("Context", f"{agent.context_usage().total:,} / {agent.context_limit:,} estimated tokens ({agent.context_usage().percent}%)"),
     ]
     return agent.ui.kv_box("local-code status", rows, color=UI.CYAN)
 
@@ -505,22 +516,28 @@ def interactive_loop(agent):
             value = prompt.split(None, 1)[1].strip()
             agent.frontend_model = value
             agent.backend_model = value
+            agent.preferred_frontend_model = value
+            agent.preferred_backend_model = value
             print(render_header(agent))
             continue
         if prompt.startswith("/frontend "):
             agent.frontend_model = prompt.split(None, 1)[1].strip()
+            agent.preferred_frontend_model = agent.frontend_model
             print(render_header(agent))
             continue
         if prompt.startswith("/backend "):
             agent.backend_model = prompt.split(None, 1)[1].strip()
+            agent.preferred_backend_model = agent.backend_model
             print(render_header(agent))
             continue
         if prompt.startswith("/planner "):
             agent.frontend_model = prompt.split(None, 1)[1].strip()
+            agent.preferred_frontend_model = agent.frontend_model
             print(render_header(agent))
             continue
         if prompt.startswith("/coder "):
             agent.backend_model = prompt.split(None, 1)[1].strip()
+            agent.preferred_backend_model = agent.backend_model
             print(render_header(agent))
             continue
         if prompt.startswith("/permission "):
@@ -579,6 +596,29 @@ def interactive_loop(agent):
                 print(f"Tool calling: {agent.tool_calling}")
             else:
                 print("Use /tools json, /tools native, or /tools auto")
+            continue
+        if prompt == "/context":
+            usage = agent.context_usage()
+            print(agent.ui.kv_box("Context usage", [
+                ("Conversation", f"{usage.conversation:,}"),
+                ("Memory", f"{usage.memory:,}"),
+                ("Repo", f"{usage.repo:,}"),
+                ("Tools", f"{usage.tools:,}"),
+                ("Other", f"{usage.other:,}"),
+                ("Total", f"{usage.total:,} / {usage.limit:,} ({usage.percent}%)"),
+                ("Remaining", f"{usage.remaining:,}"),
+            ], color=UI.CYAN))
+            continue
+        if prompt.startswith("/routing "):
+            value = prompt.split(None, 1)[1].strip().lower()
+            if value not in {"single", "adaptive", "dual"}:
+                print("Use /routing single, /routing adaptive, or /routing dual")
+                continue
+            hardware = detect_hardware(getattr(agent.provider, "base_url", None) if agent.provider.is_local else None)
+            front, back, decision = resolve_model_routing(value, agent.provider.is_local, hardware, agent.preferred_frontend_model, agent.preferred_backend_model, agent.context_limit)
+            agent.model_routing, agent.frontend_model, agent.backend_model, agent.routing_decision = value, front, back, decision
+            agent.sync_executor()
+            print(f"Model routing: {decision['mode']} — {decision['reason']}")
             continue
         if prompt.startswith("/raw "):
             value = prompt.split(None, 1)[1].strip().lower()
@@ -767,8 +807,26 @@ def main():
     backend_model = args.backend_model_alias or args.backend_model or args.model or default_model or DEFAULT_BACKEND_MODEL
     command_permission = "allow" if args.auto_approve else "ask"
 
-    ollama_base = args.base_url or args.ollama if args.provider == "ollama" else args.base_url
+    ollama_base = (args.base_url or args.ollama) if args.provider == "ollama" else args.base_url
     provider = build_provider(args.provider, base_url=ollama_base, api_key=args.api_key)
+
+    if args.command == "doctor":
+        report = doctor_report(provider, frontend_model, backend_model, DEFAULT_NUM_CTX)
+        print(to_json(report) if args.json_output else format_doctor(report))
+        return 0 if report["provider_available"] else 1
+    if args.command == "benchmark":
+        if args.benchmark_runs < 1:
+            sys.stderr.write("--benchmark-runs must be at least 1.\n")
+            return 2
+        report = benchmark_model(provider, backend_model, args.benchmark_runs, DEFAULT_NUM_CTX)
+        print(to_json(report) if args.json_output else format_benchmark(report))
+        return 0
+
+    preferred_frontend_model, preferred_backend_model = frontend_model, backend_model
+    hardware = detect_hardware(ollama_base if provider.is_local else None)
+    frontend_model, backend_model, routing_decision = resolve_model_routing(
+        args.model_routing, provider.is_local, hardware, frontend_model, backend_model, DEFAULT_NUM_CTX
+    )
 
     agent = LocalPartner(
         frontend_model=frontend_model,
@@ -782,6 +840,11 @@ def main():
         show_raw_actions=args.show_raw_actions,
         mode=args.mode,
         tool_calling=args.tool_calling,
+        model_routing=args.model_routing,
+        routing_decision=routing_decision,
+        context_limit=DEFAULT_NUM_CTX,
+        preferred_frontend_model=preferred_frontend_model,
+        preferred_backend_model=preferred_backend_model,
     )
     if not args.no_preflight:
         run_preflight(agent)

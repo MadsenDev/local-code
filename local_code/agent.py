@@ -13,6 +13,7 @@ from pathlib import Path
 from .config import (
     CODE_ACTION_RE,
     DEFAULT_MODE,
+    DEFAULT_NUM_CTX,
     DEFAULT_OLLAMA,
     DEFAULT_TOOL_CALLING,
     DEFAULT_VERBOSITY,
@@ -25,6 +26,7 @@ from .config import (
     TEST_COMMAND_PATTERNS,
 )
 from .model_profiles import classify_model
+from .context import build_context_usage
 from .providers import OllamaProvider
 from .contracts import (
     has_database_context,
@@ -1018,9 +1020,16 @@ class LocalPartner:
         provider=None,
         observer=None,
         confirm_hook=None,
+        model_routing="adaptive",
+        routing_decision=None,
+        context_limit=DEFAULT_NUM_CTX,
+        preferred_frontend_model=None,
+        preferred_backend_model=None,
     ):
         self.frontend_model = frontend_model
         self.backend_model = backend_model
+        self.preferred_frontend_model = preferred_frontend_model or frontend_model
+        self.preferred_backend_model = preferred_backend_model or backend_model
         self.provider = provider or OllamaProvider(ollama)
         self.ollama = getattr(self.provider, "base_url", ollama)
         self.workdir = str(Path(workdir).resolve())
@@ -1031,6 +1040,10 @@ class LocalPartner:
         self.show_raw_actions = show_raw_actions
         self.mode = mode
         self.tool_calling = tool_calling
+        self.model_routing = model_routing
+        self.routing_decision = routing_decision or {"mode": "single" if frontend_model == backend_model else "dual", "reason": "Models configured directly."}
+        self.context_limit = context_limit
+        self.active_context_extra = ""
         self.ui = UI()
         self.observer = observer
         self.confirm_hook = confirm_hook
@@ -1058,6 +1071,18 @@ class LocalPartner:
             tool_calling=self.tool_calling,
             observer=observer,
             confirm_hook=confirm_hook,
+        )
+
+    def context_usage(self, extra=None):
+        """Estimate the active prompt budget by source for transparent local tuning."""
+        tool_text = tool_prompt_lines(self.executor.allowed_tool_names({"edit_policy": "execute"}))
+        return build_context_usage(
+            history=self.history,
+            memory=load_repo_memory(self.workdir),
+            repo=git_context(self.workdir),
+            tools=tool_text,
+            other=self.active_context_extra if extra is None else extra,
+            limit=self.context_limit,
         )
 
     def _prune_history(self):
@@ -1712,6 +1737,7 @@ class LocalPartner:
         return reply
 
     def run_turn(self, user_prompt, planning=False):
+        self.active_context_extra = user_prompt
         self.sync_executor()
         self._prune_history()
         if self.pending_plan and PROMPT_YES_RE.search(user_prompt.strip()):

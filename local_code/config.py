@@ -9,6 +9,7 @@ DEFAULT_BACKEND_MODEL = "qwen2.5-coder:7b"
 DEFAULT_MODE = "hybrid"
 DEFAULT_VERBOSITY = "normal"
 DEFAULT_TOOL_CALLING = "json"
+DEFAULT_MODEL_ROUTING = "adaptive"
 DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 MAX_TOOL_STEPS = 100
 MAX_OUTPUT_CHARS = 12000
@@ -69,6 +70,8 @@ HELP_TEXT = """Commands:
 /undo                         Revert files changed by the last execute run
 /status                       Show current settings
 /models                       Show model tiers and the recommended-minimum standard
+/context                      Show context-window accounting
+/routing MODE                 Set model routing: single, adaptive, dual
 /quit                         Exit
 """
 
