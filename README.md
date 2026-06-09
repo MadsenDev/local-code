@@ -353,8 +353,9 @@ Rist uses an explicit privacy boundary inside each repository:
 .rist/
 ├── project/                 # reviewable, optionally committed team knowledge
 │   ├── intelligence.json
+│   ├── dependency-graph.json    # typed static-analysis and manifest graph
 │   ├── project.md
-│   ├── architecture.md
+│   ├── architecture.md          # concise generated graph view
 │   └── decisions.md
 ├── local/                   # always ignored, machine/user-specific state
 │   ├── intelligence/
@@ -380,6 +381,12 @@ remain local. Project-scope writes are rejected if they contain likely secrets,
 prompt or provider details, environment values, sensitive fields, or absolute
 home-directory paths. Treat this as a safety net, not a substitute for review:
 inspect `.rist/project/` before staging it.
+
+The `rist index` command merges filesystem, package-manifest, and language-parser
+evidence into `dependency-graph.json`. Python extraction uses the standard
+library AST, while JavaScript and TypeScript use a replaceable parser adapter.
+Stable node and edge IDs make incremental indexing remove stale relationships;
+the generated `architecture.md` summarizes inferred layers and cites graph IDs.
 
 Chat transcripts, raw run logs, caches, local paths, provider configuration, and
 personal workflow preferences always belong under `.rist/local/` and are

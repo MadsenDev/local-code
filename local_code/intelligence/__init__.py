@@ -1,5 +1,21 @@
 """Structured, durable repository intelligence and editable Markdown views."""
 
+from .graph import (
+    DependencyGraph,
+    EdgeKind,
+    Evidence,
+    GraphEdge,
+    GraphNode,
+    GraphQuery,
+    JavaScriptParserAdapter,
+    NodeKind,
+    ParserAdapter,
+    PythonAstAdapter,
+    SourceLocation,
+    apply_semantic_enrichment,
+    build_dependency_graph,
+    render_architecture,
+)
 from .records import (
     ComponentRecord,
     ConventionRecord,
@@ -32,6 +48,20 @@ from .storage import (
 )
 
 __all__ = [
+    "DependencyGraph",
+    "EdgeKind",
+    "Evidence",
+    "GraphEdge",
+    "GraphNode",
+    "GraphQuery",
+    "JavaScriptParserAdapter",
+    "NodeKind",
+    "ParserAdapter",
+    "PythonAstAdapter",
+    "SourceLocation",
+    "apply_semantic_enrichment",
+    "build_dependency_graph",
+    "render_architecture",
     "ComponentRecord",
     "ConventionRecord",
     "DecisionRecord",
