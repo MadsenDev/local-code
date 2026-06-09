@@ -134,7 +134,7 @@ def test_legacy_command_warns_then_runs(tmp_path, monkeypatch, capsys):
 
 
 def test_chat_subcommand_selects_chat_mode(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["rist", "chat", "--no-preflight", "--prompt", "hello"])
+    monkeypatch.setattr(sys, "argv", ["rist", "chat", "--no-preflight", "--storage-mode", "local-only", "--prompt", "hello"])
     captured = {}
 
     class FakeAgent:
@@ -152,3 +152,4 @@ def test_chat_subcommand_selects_chat_mode(monkeypatch):
     monkeypatch.setattr(cli, "resolve_model_routing", lambda *args, **kwargs: (args[3], args[4], {"mode": "single"}))
     assert cli.main() == 0
     assert captured["mode"] == "chat"
+    assert captured["storage_mode"] == "local-only"

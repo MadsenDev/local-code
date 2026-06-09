@@ -347,18 +347,55 @@ baseline.
 
 ## Structured repository intelligence
 
-Rist stores durable repository knowledge in the versioned `.rist/intelligence.json`
-document. Typed records cover project identity, principles, facts, decisions,
-components, relationships, lifecycle status, conventions, workflows, and learned
-file associations. Every record has a stable ID, lifecycle status, confidence,
-source provenance, timestamps, and supersession links.
+Rist uses an explicit privacy boundary inside each repository:
 
-The `.rist/project.md`, `.rist/architecture.md`, and `.rist/decisions.md` files are
+```text
+.rist/
+├── project/                 # reviewable, optionally committed team knowledge
+│   ├── intelligence.json
+│   ├── project.md
+│   ├── architecture.md
+│   └── decisions.md
+├── local/                   # always ignored, machine/user-specific state
+│   ├── intelligence/
+│   ├── chat_history.jsonl
+│   ├── runs.jsonl
+│   └── preferences.json
+└── .gitignore               # precise scope rules; never a blanket `*`
+```
+
+Choose the policy with `--storage-mode local-only|shared|hybrid`, or set
+`RIST_STORAGE_MODE`. The default is `hybrid`:
+
+- **`local-only`** ignores both scopes and reads only local intelligence.
+- **`shared`** reads reviewable project intelligence and disables automatic
+  learning from raw run history.
+- **`hybrid`** reads both scopes, while automatically learned facts remain
+  local until a person rewrites/reviews them for `.rist/project/`.
+
+Only durable, reviewed project identity, accepted decisions, architecture
+components/relationships, conventions, and lifecycle classifications are
+eligible for the project scope. Proposed/rejected records and operational facts
+remain local. Project-scope writes are rejected if they contain likely secrets,
+prompt or provider details, environment values, sensitive fields, or absolute
+home-directory paths. Treat this as a safety net, not a substitute for review:
+inspect `.rist/project/` before staging it.
+
+Chat transcripts, raw run logs, caches, local paths, provider configuration, and
+personal workflow preferences always belong under `.rist/local/` and are
+ignored. Never copy API keys, tokens, prompts, `.env` contents, or personal paths
+into reviewable records.
+
+On first use after an upgrade, Rist moves the old fully ignored root-level
+`.rist` intelligence and `.rist/private/` state into `.rist/local/`, replaces
+the blanket `.rist/.gitignore` rule with precise entries, and removes obsolete
+whole-`.rist` rules from `.git/info/exclude`. Migration never runs `git add`,
+never stages files, and never commits anything. Review and manually promote only
+the minimal knowledge your team intends to share. Existing `.local-code/`
+repository memory is copied first and then follows the same private migration.
+
+The versioned JSON store remains authoritative and the Markdown files are
 editable views. Rist imports supported bullet, status, and confidence edits and
-then renders the views back from the structured store. Existing Markdown files
-created by earlier releases are imported automatically.
-
-Repository intelligence is intentionally separate from private or short-lived
-state: chat history, run logs, and user preferences live under `.rist/private/`.
-This separation allows repository facts and interaction data to use different
-retention and sharing policies.
+then renders the views back from structured records. Every record retains a
+stable ID, lifecycle status, confidence, source provenance, timestamps, and
+supersession links.

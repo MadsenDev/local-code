@@ -96,6 +96,12 @@ def parse_args():
     parser.add_argument("--show-raw-actions", action="store_true", help="Show raw JSON actions/contracts in debug mode")
     parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
+    parser.add_argument(
+        "--storage-mode",
+        choices=["local-only", "shared", "hybrid"],
+        default=None,
+        help="Repository memory policy (default: RIST_STORAGE_MODE or hybrid)",
+    )
     parser.add_argument("--model-routing", choices=["single", "adaptive", "dual"], default=DEFAULT_MODEL_ROUTING, help=f"Model residency/routing strategy ({DEFAULT_MODEL_ROUTING})")
     parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs per prompt size (3)")
     parser.add_argument("--long-context", action="store_true", help="Include an optional long-context benchmark prompt")
@@ -541,7 +547,7 @@ def interactive_loop(agent):
         try:
             prompt = read_prompt(session, pastes)
         except (EOFError, KeyboardInterrupt):
-            save_chat_history(agent.workdir, agent.history)
+            save_chat_history(agent.workdir, agent.history, agent.storage_mode)
             print()
             return 0
 
@@ -561,7 +567,7 @@ def interactive_loop(agent):
         if prompt == "/clear":
             agent.history.clear()
             agent.pending_plan = None
-            clear_chat_history(agent.workdir)
+            clear_chat_history(agent.workdir, agent.storage_mode)
             print("History cleared.")
             continue
         if prompt.startswith("/mode "):
@@ -1147,6 +1153,7 @@ def main():
         context_limit=DEFAULT_NUM_CTX,
         preferred_frontend_model=preferred_frontend_model,
         preferred_backend_model=preferred_backend_model,
+        storage_mode=args.storage_mode,
     )
     if not args.no_preflight:
         run_preflight(agent)

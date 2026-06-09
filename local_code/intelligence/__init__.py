@@ -18,6 +18,18 @@ from .records import (
 )
 from .schema import SCHEMA_VERSION, IntelligenceValidationError, validate_document
 from .store import IntelligenceStore, atomic_write_text
+from .storage import (
+    DEFAULT_STORAGE_MODE,
+    SHAREABLE_RECORD_KINDS,
+    SHAREABLE_RECORD_STATUSES,
+    ShareableContentError,
+    StorageMode,
+    StorageScope,
+    coerce_storage_mode,
+    record_is_reviewable,
+    scope_path,
+    validate_shareable_record,
+)
 
 __all__ = [
     "ComponentRecord",
@@ -36,7 +48,17 @@ __all__ = [
     "RelationshipRecord",
     "SCHEMA_VERSION",
     "WorkflowRecord",
+    "DEFAULT_STORAGE_MODE",
+    "SHAREABLE_RECORD_KINDS",
+    "SHAREABLE_RECORD_STATUSES",
+    "ShareableContentError",
+    "StorageMode",
+    "StorageScope",
     "atomic_write_text",
     "stable_record_id",
+    "coerce_storage_mode",
+    "record_is_reviewable",
+    "scope_path",
     "validate_document",
+    "validate_shareable_record",
 ]

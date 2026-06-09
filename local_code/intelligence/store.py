@@ -12,6 +12,7 @@ from typing import Any, Iterable, Mapping
 from .markdown import VIEW_SECTIONS, content_hash, parse_legacy_view, parse_view, render_view
 from .records import IntelligenceRecord, RecordKind, RecordStatus, record_from_dict, stable_record_id, utc_now
 from .schema import SCHEMA_VERSION, IntelligenceValidationError, validate_document
+from .storage import StorageScope, validate_shareable_record
 
 INTELLIGENCE_FILENAME = "intelligence.json"
 
@@ -35,6 +36,7 @@ def atomic_write_text(path: Path, content: str) -> None:
 @dataclass(slots=True)
 class IntelligenceStore:
     base_path: Path
+    scope: StorageScope = StorageScope.LOCAL
     records: dict[str, IntelligenceRecord] = field(default_factory=dict)
     view_hashes: dict[str, str] = field(default_factory=dict)
 
@@ -43,8 +45,15 @@ class IntelligenceStore:
         return self.base_path / INTELLIGENCE_FILENAME
 
     @classmethod
-    def load(cls, base_path: str | Path, *, sync_views: bool = True) -> "IntelligenceStore":
+    def load(
+        cls,
+        base_path: str | Path,
+        *,
+        sync_views: bool = True,
+        scope: StorageScope | str = StorageScope.LOCAL,
+    ) -> "IntelligenceStore":
         base = Path(base_path)
+        storage_scope = StorageScope(scope)
         base.mkdir(parents=True, exist_ok=True)
         path = base / INTELLIGENCE_FILENAME
         if path.exists():
@@ -56,11 +65,12 @@ class IntelligenceStore:
             validate_document(document)
             store = cls(
                 base_path=base,
+                scope=storage_scope,
                 records={item["id"]: record_from_dict(item) for item in document["records"]},
                 view_hashes=dict(document.get("view_hashes", {})),
             )
         else:
-            store = cls(base_path=base)
+            store = cls(base_path=base, scope=storage_scope)
             store._import_legacy_views()
         if sync_views:
             store.sync_markdown_views()
@@ -78,7 +88,13 @@ class IntelligenceStore:
     def upsert(self, record: IntelligenceRecord) -> None:
         self.records[record.id] = record
 
+    def _validate_scope(self) -> None:
+        if self.scope == StorageScope.PROJECT:
+            for record in self.records.values():
+                validate_shareable_record(record)
+
     def save(self) -> None:
+        self._validate_scope()
         document = self.to_document()
         validate_document(document)
         atomic_write_text(self.path, json.dumps(document, indent=2, ensure_ascii=False, sort_keys=True) + "\n")
@@ -101,6 +117,7 @@ class IntelligenceStore:
                 continue
             for record in parse_view(filename, text, self.records):
                 self.upsert(record)
+        self._validate_scope()
         for filename in VIEW_SECTIONS:
             rendered = render_view(filename, self.records.values())
             atomic_write_text(self.base_path / filename, rendered)

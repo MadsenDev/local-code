@@ -124,7 +124,7 @@ When `edit_policy` is `plan` or `propose`, the backend produces a report without
 
 ### Memory (`.rist/`)
 
-Per-repo memory lives in `.rist/` (git-excluded). Files: `project.md`, `decisions.md`, `architecture.md`, `runs.jsonl`. `load_repo_memory()` concatenates these and injects them into the backend system prompt. The directory is auto-created on first run.
+Per-repo memory has an explicit boundary: `.rist/project/` contains reviewed, optionally commit-friendly intelligence; `.rist/local/` contains ignored chat history, run logs, preferences, automatic facts, provider details, and machine-specific paths. `--storage-mode local-only|shared|hybrid` controls which knowledge is read. The default hybrid mode reads both but keeps automatic learning local. `load_repo_memory()` injects the selected Markdown views into the backend system prompt. Shareable records reject secrets, prompts, environment values, provider details, and absolute home paths.
 
 ### Tools available to the backend
 

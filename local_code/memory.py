@@ -1,66 +1,133 @@
+"""Per-repository storage with an explicit shareable/private boundary."""
+
 import json
 import shutil
 import subprocess
 from pathlib import Path
 
 from .config import LEGACY_MEMORY_DIR_NAME, MAX_HISTORY_MESSAGES, MEMORY_DIR_NAME
-from .intelligence import IntelligenceStore, atomic_write_text
+from .intelligence import (
+    IntelligenceStore,
+    StorageMode,
+    StorageScope,
+    atomic_write_text,
+    coerce_storage_mode,
+)
 from .ui import clip
 
+_PRIVATE_FILENAMES = ("runs.jsonl", "chat_history.jsonl", "preferences.json")
+_LEGACY_INTELLIGENCE_FILENAMES = ("intelligence.json", "project.md", "decisions.md", "architecture.md")
 
-def memory_paths(workdir):
+
+def memory_paths(workdir, storage_mode=None):
     root = Path(workdir)
     base = root / MEMORY_DIR_NAME
     legacy = root / LEGACY_MEMORY_DIR_NAME
     if not base.exists() and legacy.is_dir():
         shutil.copytree(legacy, base)
-    private = base / "private"
+    mode = coerce_storage_mode(storage_mode)
+    project_scope = base / StorageScope.PROJECT.value
+    local_scope = base / StorageScope.LOCAL.value
+    local_intelligence = local_scope / "intelligence"
+    active_intelligence = project_scope if mode == StorageMode.SHARED else local_intelligence
     return {
         "base": base,
-        "intelligence": base / "intelligence.json",
-        "private": private,
-        "project": base / "project.md",
-        "decisions": base / "decisions.md",
-        "architecture": base / "architecture.md",
-        "runs": private / "runs.jsonl",
-        "chat_history": private / "chat_history.jsonl",
-        "preferences": private / "preferences.json",
+        "mode": mode,
+        "project_scope": project_scope,
+        "local": local_scope,
+        "local_intelligence": local_intelligence,
+        "active_intelligence": active_intelligence,
+        "intelligence": active_intelligence / "intelligence.json",
+        "project": active_intelligence / "project.md",
+        "decisions": active_intelligence / "decisions.md",
+        "architecture": active_intelligence / "architecture.md",
+        "runs": local_scope / "runs.jsonl",
+        "chat_history": local_scope / "chat_history.jsonl",
+        "preferences": local_scope / "preferences.json",
         "gitignore": base / ".gitignore",
     }
 
 
-def ensure_memory_files(workdir):
-    """Create separated durable-fact and private interaction stores.
+def _move_if_needed(source: Path, destination: Path, conflict_root: Path) -> None:
+    if not source.exists():
+        return
+    if destination.exists():
+        if source.is_file() and destination.is_file() and source.read_bytes() == destination.read_bytes():
+            source.unlink()
+            return
+        conflict = conflict_root / destination.name
+        index = 1
+        while conflict.exists():
+            conflict = conflict_root / f"{destination.stem}-{index}{destination.suffix}"
+            index += 1
+        conflict.parent.mkdir(parents=True, exist_ok=True)
+        source.replace(conflict)
+        return
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source.replace(destination)
 
-    Existing root-level Markdown is imported by ``IntelligenceStore``. Existing
-    run/chat JSONL files are moved under ``.rist/private`` so they cannot be
-    mistaken for shareable repository intelligence.
+
+def _migrate_fully_ignored_layout(paths) -> None:
+    """Move legacy root data into private storage without touching Git's index."""
+    base = paths["base"]
+    local_intelligence = paths["local_intelligence"]
+    conflicts = paths["local"] / "migration-conflicts"
+    for filename in _LEGACY_INTELLIGENCE_FILENAMES:
+        _move_if_needed(base / filename, local_intelligence / filename, conflicts / "intelligence")
+    for filename in _PRIVATE_FILENAMES:
+        _move_if_needed(base / filename, paths["local"] / filename, conflicts / "state")
+    old_private = base / "private"
+    if old_private.is_dir():
+        for filename in _PRIVATE_FILENAMES:
+            _move_if_needed(old_private / filename, paths["local"] / filename, conflicts / "private")
+        try:
+            old_private.rmdir()
+        except OSError:
+            pass
+
+
+def _gitignore_content(mode: StorageMode) -> str:
+    lines = [
+        "# Rist private state: never commit chat, runs, caches, paths, providers, or preferences.",
+        "/local/",
+    ]
+    if mode == StorageMode.LOCAL_ONLY:
+        lines.extend(("# local-only mode also keeps reviewable project knowledge untracked.", "/project/"))
+    return "\n".join(lines) + "\n"
+
+
+def ensure_memory_files(workdir, storage_mode=None):
+    """Create scoped knowledge stores and migrate the old fully ignored layout.
+
+    Migration only moves files beneath ``.rist`` and updates ignore metadata. It
+    never invokes ``git add`` or otherwise stages/commits project knowledge.
     """
-    paths = memory_paths(workdir)
+    paths = memory_paths(workdir, storage_mode)
     paths["base"].mkdir(parents=True, exist_ok=True)
-    paths["private"].mkdir(parents=True, exist_ok=True)
-    ensure_git_exclude(workdir)
-    for filename, key in (("runs.jsonl", "runs"), ("chat_history.jsonl", "chat_history"), ("preferences.json", "preferences")):
-        legacy_path = paths["base"] / filename
-        if legacy_path.exists() and not paths[key].exists():
-            legacy_path.replace(paths[key])
+    paths["local"].mkdir(parents=True, exist_ok=True)
+    _migrate_fully_ignored_layout(paths)
+    ensure_git_exclude(workdir, paths["mode"])
+    atomic_write_text(paths["gitignore"], _gitignore_content(paths["mode"]))
     for key in ("runs", "chat_history"):
         if not paths[key].exists():
             paths[key].touch()
     if not paths["preferences"].exists():
         atomic_write_text(paths["preferences"], "{}\n")
-    if not paths["gitignore"].exists():
-        atomic_write_text(paths["gitignore"], "*\n")
-    IntelligenceStore.load(paths["base"], sync_views=True)
+
+    if paths["mode"] != StorageMode.SHARED:
+        IntelligenceStore.load(paths["local_intelligence"], sync_views=True, scope=StorageScope.LOCAL)
+    if paths["mode"] != StorageMode.LOCAL_ONLY:
+        IntelligenceStore.load(paths["project_scope"], sync_views=True, scope=StorageScope.PROJECT)
     return paths
 
 
-def ensure_git_exclude(workdir):
+def ensure_git_exclude(workdir, storage_mode=None):
+    """Ignore only private state and remove obsolete whole-directory excludes."""
+    mode = coerce_storage_mode(storage_mode)
     try:
         completed = subprocess.run(
-            "git rev-parse --git-path info/exclude",
+            ["git", "rev-parse", "--git-path", "info/exclude"],
             cwd=workdir,
-            shell=True,
             text=True,
             capture_output=True,
             timeout=5,
@@ -69,26 +136,44 @@ def ensure_git_exclude(workdir):
         return
     if completed.returncode != 0:
         return
-    exclude_path = Path(workdir) / completed.stdout.strip()
+    exclude_path = Path(completed.stdout.strip())
     if not exclude_path.is_absolute():
-        exclude_path = exclude_path.resolve()
+        exclude_path = (Path(workdir) / exclude_path).resolve()
     try:
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude_path.read_text(encoding="utf-8", errors="replace") if exclude_path.exists() else ""
-        if f"{MEMORY_DIR_NAME}/" not in existing:
-            suffix = "" if existing.endswith("\n") or not existing else "\n"
-            exclude_path.write_text(existing + suffix + f"{MEMORY_DIR_NAME}/\n", encoding="utf-8")
+        obsolete = {f"{MEMORY_DIR_NAME}/", f"/{MEMORY_DIR_NAME}/", f"{MEMORY_DIR_NAME}/**", f"/{MEMORY_DIR_NAME}/**"}
+        if mode != StorageMode.LOCAL_ONLY:
+            obsolete.add(f"/{MEMORY_DIR_NAME}/project/")
+            obsolete.add(f"{MEMORY_DIR_NAME}/project/")
+        lines = [line for line in existing.splitlines() if line.strip() not in obsolete]
+        required = [f"/{MEMORY_DIR_NAME}/local/"]
+        if mode == StorageMode.LOCAL_ONLY:
+            required.append(f"/{MEMORY_DIR_NAME}/project/")
+        for entry in required:
+            if entry not in lines:
+                lines.append(entry)
+        content = "\n".join(lines).rstrip()
+        atomic_write_text(exclude_path, content + ("\n" if content else ""))
     except Exception:  # noqa: BLE001
         return
 
 
-def load_repo_memory(workdir):
-    paths = ensure_memory_files(workdir)
+def load_repo_memory(workdir, storage_mode=None):
+    paths = ensure_memory_files(workdir, storage_mode)
+    stores = []
+    if paths["mode"] in {StorageMode.SHARED, StorageMode.HYBRID}:
+        stores.append(paths["project_scope"])
+    if paths["mode"] in {StorageMode.LOCAL_ONLY, StorageMode.HYBRID}:
+        stores.append(paths["local_intelligence"])
     chunks = []
-    for key in ("project", "decisions", "architecture"):
-        text = paths[key].read_text(encoding="utf-8", errors="replace").strip()
-        if text:
-            chunks.append(f"{key}.md:\n{clip(text, 2000)}")
+    for store in stores:
+        label = store.relative_to(paths["base"])
+        for filename in ("project.md", "decisions.md", "architecture.md"):
+            path = store / filename
+            text = path.read_text(encoding="utf-8", errors="replace").strip()
+            if text:
+                chunks.append(f"{label}/{filename}:\n{clip(text, 2000)}")
     return "\n\n".join(chunks)
 
 
@@ -110,8 +195,8 @@ def load_recent_runs(path, limit=5):
     return "\n".join(summaries)
 
 
-def append_run_log(workdir, entry):
-    paths = ensure_memory_files(workdir)
+def append_run_log(workdir, entry, storage_mode=None):
+    paths = ensure_memory_files(workdir, storage_mode)
     with paths["runs"].open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
     _trim_run_log(paths["runs"])
@@ -126,8 +211,8 @@ def _trim_run_log(path, limit=500):
         pass
 
 
-def load_chat_history(workdir):
-    path = memory_paths(workdir)["chat_history"]
+def load_chat_history(workdir, storage_mode=None):
+    path = memory_paths(workdir, storage_mode)["chat_history"]
     if not path.exists():
         return []
     history = []
@@ -144,8 +229,8 @@ def load_chat_history(workdir):
     return history[-MAX_HISTORY_MESSAGES:]
 
 
-def save_chat_history(workdir, history):
-    path = memory_paths(workdir)["chat_history"]
+def save_chat_history(workdir, history, storage_mode=None):
+    path = memory_paths(workdir, storage_mode)["chat_history"]
     try:
         content = "".join(json.dumps(msg, ensure_ascii=False) + "\n" for msg in history)
         atomic_write_text(path, content)
@@ -153,8 +238,8 @@ def save_chat_history(workdir, history):
         pass
 
 
-def clear_chat_history(workdir):
-    path = memory_paths(workdir)["chat_history"]
+def clear_chat_history(workdir, storage_mode=None):
+    path = memory_paths(workdir, storage_mode)["chat_history"]
     try:
         atomic_write_text(path, "")
     except Exception:  # noqa: BLE001
