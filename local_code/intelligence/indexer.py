@@ -8,16 +8,20 @@ import os
 import re
 import subprocess
 import tempfile
+import tomllib
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from ..tools import ENTRYPOINTS, NOISY_DIRS
+from .graph import build_dependency_graph, render_architecture
 
 SCHEMA_VERSION = 1
 DEFAULT_MAX_FILE_SIZE = 2 * 1024 * 1024
-ARTIFACT_NAMES = ("repo-map.json", "manifests.json", "conventions.json")
+ARTIFACT_NAMES = ("repo-map.json", "manifests.json", "conventions.json", "dependency-graph.json")
+ARCHITECTURE_VIEW = "architecture.md"
+PUBLISHED_NAMES = (*ARTIFACT_NAMES, ARCHITECTURE_VIEW)
 RIST_EXCLUDED_DIRS = frozenset({".rist"})
 EXCLUDED_DIRS = frozenset(NOISY_DIRS) | RIST_EXCLUDED_DIRS
 
@@ -196,6 +200,11 @@ def _manifest_details(root: Path, paths: list[str]) -> tuple[list[dict[str, Any]
             item["name"] = package.get("name")
             scripts = package.get("scripts") if isinstance(package.get("scripts"), dict) else {}
             item["scripts"] = {str(k): str(v) for k, v in sorted(scripts.items())}
+            bins = package.get("bin")
+            if isinstance(bins, str) and item.get("name"):
+                item["entry_points"] = {str(item["name"]): bins}
+            elif isinstance(bins, dict):
+                item["entry_points"] = {str(k): str(v) for k, v in sorted(bins.items())}
             prefix = "" if item["workspace"] == "." else f"--dir {item['workspace']} "
             for name in sorted(scripts):
                 commands.setdefault(name, f"npm {prefix}run {name}".replace("npm --dir", "npm --prefix"))
@@ -207,8 +216,16 @@ def _manifest_details(root: Path, paths: list[str]) -> tuple[list[dict[str, Any]
                 item["workspace_patterns"] = sorted(str(value) for value in patterns)
         elif kind == "pyproject.toml":
             text = _read_prefix(path, 65536)
+            try:
+                pyproject = tomllib.loads(text)
+            except tomllib.TOMLDecodeError:
+                pyproject = {}
+            project = pyproject.get("project", {}) if isinstance(pyproject.get("project"), dict) else {}
             name = re.search(r"(?m)^name\s*=\s*['\"]([^'\"]+)", text)
-            item["name"] = name.group(1) if name else None
+            item["name"] = project.get("name") or (name.group(1) if name else None)
+            scripts = project.get("scripts") if isinstance(project.get("scripts"), dict) else {}
+            gui_scripts = project.get("gui-scripts") if isinstance(project.get("gui-scripts"), dict) else {}
+            item["entry_points"] = {str(k): str(v) for k, v in sorted({**scripts, **gui_scripts}.items())}
             commands.setdefault("test", "pytest")
             if "[tool.ruff" in text:
                 commands.setdefault("lint", "ruff check .")
@@ -258,7 +275,7 @@ def _load_previous(output_dir: Path) -> dict[str, Any] | None:
         return None
 
 
-def _write_atomic(output_dir: Path, artifacts: dict[str, dict[str, Any]]) -> None:
+def _write_atomic(output_dir: Path, artifacts: dict[str, dict[str, Any] | str]) -> None:
     """Publish a complete snapshot by atomically switching one symlink."""
     output_dir.mkdir(parents=True, exist_ok=True)
     snapshots = output_dir / ".index-snapshots"
@@ -268,11 +285,15 @@ def _write_atomic(output_dir: Path, artifacts: dict[str, dict[str, Any]]) -> Non
     if not destination.exists():
         temporary = Path(tempfile.mkdtemp(prefix=".staging-", dir=snapshots))
         try:
-            for name in ARTIFACT_NAMES:
+            for name in PUBLISHED_NAMES:
                 path = temporary / name
                 with path.open("w", encoding="utf-8") as handle:
-                    json.dump(artifacts[name], handle, indent=2, sort_keys=True, ensure_ascii=False)
-                    handle.write("\n")
+                    content = artifacts[name]
+                    if isinstance(content, str):
+                        handle.write(content)
+                    else:
+                        json.dump(content, handle, indent=2, sort_keys=True, ensure_ascii=False)
+                        handle.write("\n")
                     handle.flush()
                     os.fsync(handle.fileno())
             os.replace(temporary, destination)
@@ -288,9 +309,9 @@ def _write_atomic(output_dir: Path, artifacts: dict[str, dict[str, Any]]) -> Non
     temporary_link.symlink_to(Path(".index-snapshots") / snapshot_id, target_is_directory=True)
 
     # Public artifact links are stable after their first creation. Later indexes
-    # switch all three together through the single atomic current-link replace.
+    # switch the complete set together through the single atomic current-link replace.
     os.replace(temporary_link, current)
-    for name in ARTIFACT_NAMES:
+    for name in PUBLISHED_NAMES:
         public = output_dir / name
         expected = Path(".index-current") / name
         if public.is_symlink() and Path(os.readlink(public)) == expected:
@@ -315,6 +336,10 @@ def index_repository(
     root = _git_root(requested) or requested
     output_dir = root / ".rist" / "project"
     previous = _load_previous(output_dir)
+    try:
+        previous_graph = json.loads((output_dir / "dependency-graph.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous_graph = None
     candidates, discovery = _candidate_files(root)
     git_state = _git_state(root) if discovery == "git" else {"revision": None, "status_sha256": None, "dirty": None}
     previous_files = {item["path"]: item for item in (previous or {}).get("files", [])}
@@ -426,10 +451,15 @@ def index_repository(
         "generated_files": generated,
         "unsupported_constructs": sorted(set(unsupported)),
     }
-    artifacts = {
+    graph = build_dependency_graph(root, files, manifests, commands, previous=previous_graph)
+    graph.metadata.update(common)
+    graph_payload = {**common, **graph.to_dict()}
+    artifacts: dict[str, dict[str, Any] | str] = {
         "repo-map.json": repo_map,
         "manifests.json": manifest_payload,
         "conventions.json": conventions_payload,
+        "dependency-graph.json": graph_payload,
+        ARCHITECTURE_VIEW: render_architecture(graph),
     }
     artifact_fingerprints = {name: _fingerprint(payload) for name, payload in artifacts.items()}
     report = {
@@ -448,7 +478,9 @@ def index_repository(
         "unsupported_constructs": sorted(set(unsupported)),
         "content_fingerprint": content_fingerprint,
         "artifact_fingerprints": artifact_fingerprints,
-        "artifacts": {name: str(output_dir / name) for name in ARTIFACT_NAMES},
+        "artifacts": {name: str(output_dir / name) for name in PUBLISHED_NAMES},
+        "stale_graph_nodes": graph.metadata["incremental"]["stale_node_ids"],
+        "stale_graph_edges": graph.metadata["incremental"]["stale_edge_ids"],
         "written": False,
         "preview_artifacts": artifacts if preview else None,
     }
