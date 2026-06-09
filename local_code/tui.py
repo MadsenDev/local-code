@@ -69,7 +69,8 @@ HELP = """\
 - `/help` — this help    · `/status` — settings    · `/models` — provider & tiers
 - `/mode chat|hybrid|agent` · `/model NAME` · `/frontend NAME` · `/backend NAME`
 - `/ask TEXT` — inspect (no edits) · `/plan TEXT` — propose · `/apply` — apply a proposal
-- `/agent TEXT` — run a task in agent mode · `/copy` — copy last response · `/clear` — clear history · `/quit` — exit
+- `/agent TEXT` — run a task in agent mode · `/decisions list|add|accept|supersede|review`
+- `/copy` — copy last response · `/clear` — clear history · `/quit` — exit
 
 **Keys**: Enter send · Ctrl+X cancel · Ctrl+L clear · Ctrl+C quit · in a proposal, type `yes` to apply.
 """
@@ -164,6 +165,13 @@ class LocalCodeApp(App):
             return True
         if cmd == "/models":
             self._write_models()
+            return True
+        if cmd == "/decisions":
+            try:
+                result = self.partner.run_decision_command("decisions " + arg)
+                self.query_one("#log", RichLog).write(Panel(Text(result), title="decisions", border_style="cyan"))
+            except (KeyError, ValueError) as exc:
+                self.query_one("#log", RichLog).write(Text(str(exc), style="yellow"))
             return True
         if cmd == "/context":
             usage = self.partner.context_usage()

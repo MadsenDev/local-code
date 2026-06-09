@@ -109,6 +109,8 @@ class IntelligenceStore:
     def sync_markdown_views(self) -> None:
         """Import changed human views, then normalize all views from structured data."""
         for filename in VIEW_SECTIONS:
+            if filename == "decisions.md" and (self.base_path / "decisions.json").exists():
+                continue
             path = self.base_path / filename
             if not path.exists():
                 continue
@@ -119,6 +121,8 @@ class IntelligenceStore:
                 self.upsert(record)
         self._validate_scope()
         for filename in VIEW_SECTIONS:
+            if filename == "decisions.md" and (self.base_path / "decisions.json").exists():
+                continue
             rendered = render_view(filename, self.records.values())
             atomic_write_text(self.base_path / filename, rendered)
             self.view_hashes[filename] = content_hash(rendered)
