@@ -23,6 +23,7 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
+from .intelligence.indexer import format_index_report, index_repository
 from .paths import rist_home
 from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
 from .llama_runtime import (
@@ -74,7 +75,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Rist - local-first AI coding agent for real developer hardware."
     )
-    parser.add_argument("command", nargs="?", choices=["chat", "doctor", "benchmark", "bench", "llama", "model"], help="Run diagnostics, benchmark, or llama.cpp helpers")
+    parser.add_argument("command", nargs="?", choices=["chat", "doctor", "benchmark", "bench", "llama", "model", "index"], help="Run diagnostics, benchmark, or llama.cpp helpers")
     parser.add_argument(
         "llama_action",
         nargs="?",
@@ -112,7 +113,9 @@ def parse_args():
     parser.add_argument("--sha256", default=None, help="Expected SHA-256 for a downloaded artifact")
     parser.add_argument("--filename", default=None, help="Destination filename for a downloaded GGUF")
     parser.add_argument("--destination", default=None, help="Destination path for a downloaded llama-server binary")
-    parser.add_argument("--force", action="store_true", help="Replace an artifact or stop a running model before removal")
+    parser.add_argument("--force", action="store_true", help="Force a full index rebuild, replace an artifact, or stop a running model before removal")
+    parser.add_argument("--status", action="store_true", help="Report repository index freshness without writing artifacts")
+    parser.add_argument("--preview", action="store_true", help="Preview repository index artifacts without writing them")
     parser.add_argument("--dry-run", action="store_true", help="Resolve and print model start details without launching a process")
     parser.add_argument("--delete-file", action="store_true", help="Delete a registered GGUF when removing a model")
     parser.add_argument("--yes", action="store_true", help="Confirm destructive model file deletion")
@@ -1072,6 +1075,18 @@ def main():
     if args.command == "chat":
         args.command = None
         args.mode = "chat"
+    if args.command == "index":
+        if args.status and (args.force or args.preview or args.dry_run):
+            sys.stderr.write("--status cannot be combined with --force, --preview, or --dry-run.\n")
+            return 2
+        report = index_repository(
+            args.workdir,
+            force=args.force,
+            preview=args.preview or args.dry_run,
+            status_only=args.status,
+        )
+        print(to_json(report) if args.json_output else format_index_report(report))
+        return 0
     if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs"}):
         try:
             return _handle_runtime_command(args)

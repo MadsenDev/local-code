@@ -11,14 +11,27 @@ from .ui import clip
 
 
 NOISY_DIRS = {
+    ".cache",
     ".git",
+    ".gradle",
+    ".mypy_cache",
     ".next",
+    ".parcel-cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".turbo",
+    ".venv",
     ".vite",
     "__pycache__",
     "build",
+    "coverage",
     "dist",
+    "htmlcov",
     "node_modules",
+    "out",
     "target",
+    "vendor",
+    "venv",
 }
 
 DOC_FILES = ("README.md", "AGENTS.md", "CLAUDE.md", "project.md")
