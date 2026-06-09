@@ -12,11 +12,13 @@ import json
 import os
 import shutil
 import signal
+import shlex
 import socket
 import subprocess
 import time
 import urllib.parse
 import urllib.request
+from collections import deque
 from pathlib import Path
 
 from .llamacpp import DEFAULT_LLAMACPP_BASE_URL, generate_llama_server_args, get_llamacpp_profile
@@ -28,6 +30,10 @@ def local_code_home() -> Path:
 
 def runtime_dir() -> Path:
     return local_code_home() / "runtimes" / "llamacpp"
+
+
+def log_path() -> Path:
+    return runtime_dir() / "server.log"
 
 
 def models_dir() -> Path:
@@ -182,6 +188,92 @@ def list_managed_models():
     return sorted(result, key=lambda item: item["id"])
 
 
+def remove_model(profile_id: str, *, delete_file=False, confirmed=False, force=False):
+    """Unregister a model and optionally delete its registered GGUF file."""
+    key = model_key(profile_id)
+    registry = _load_registry()
+    entry = registry.get(key)
+    if not entry:
+        raise KeyError(f"Model {profile_id!r} is not registered.")
+    status = server_status()
+    if status.get("managed") and status.get("profile") == key and status.get("state") in {"running", "starting", "ready"}:
+        if not force:
+            raise RuntimeError("This model is running in the managed llama.cpp runtime. Stop it first or pass --force.")
+        stop_server()
+    path = Path(entry.get("path", "")).expanduser()
+    existed = path.is_file()
+    if delete_file and not confirmed:
+        raise PermissionError("Deleting a registered GGUF requires explicit confirmation or --yes.")
+    if delete_file and existed:
+        path.unlink()
+    registry.pop(key, None)
+    _save_registry(registry)
+    return {
+        "id": key,
+        "path": str(path),
+        "unregistered": True,
+        "delete_requested": delete_file,
+        "file_deleted": bool(delete_file and existed),
+        "file_missing": not existed,
+    }
+
+
+def validate_port(port):
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError("Port must be an integer between 1 and 65535.")
+
+
+def validate_server_args(args):
+    """Validate generated numeric llama-server settings without interpreting GGUF."""
+    checks = {"-c": "context", "-t": "threads", "-b": "batch", "-ub": "ubatch"}
+    for flag, label in checks.items():
+        try:
+            value = int(args[args.index(flag) + 1])
+        except (ValueError, IndexError) as exc:
+            raise ValueError(f"llama.cpp {label} must be a valid integer.") from exc
+        if value <= 0:
+            raise ValueError(f"llama.cpp {label} must be greater than zero.")
+    port = int(args[args.index("--port") + 1])
+    validate_port(port)
+
+
+def prepare_server_start(
+    profile_id: str,
+    gpu: str,
+    *,
+    model_path: str | None = None,
+    executable: str | None = None,
+    host="127.0.0.1",
+    port=8080,
+):
+    """Resolve and validate exactly the command and paths used by start_server."""
+    validate_port(port)
+    binary = find_llama_server(executable)
+    if not binary:
+        raise FileNotFoundError(
+            "llama-server was not found. Install llama.cpp separately, set LLAMA_SERVER, pass --llama-server, "
+            "or run `local-code llama install --url URL` for a prebuilt binary."
+        )
+    path = resolve_model_path(profile_id, model_path)
+    if Path(path).suffix.lower() != ".gguf":
+        raise ValueError("The model path must point to a .gguf file.")
+    args = generate_llama_server_args(profile_id, gpu, path, host=host, port=port, executable=binary)
+    validate_server_args(args)
+    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
+    return {
+        "profile": model_key(profile_id),
+        "model_path": path,
+        "executable": binary,
+        "host": host,
+        "port": port,
+        "base_url": f"http://{connect_host}:{port}/v1",
+        "args": args,
+        "command": shlex.join(args),
+        "log_path": str(log_path()),
+        "state_path": str(state_path()),
+    }
+
+
 def resolve_model_path(profile_id: str, explicit: str | None = None) -> str:
     if explicit:
         path = Path(explicit).expanduser().resolve()
@@ -246,16 +338,35 @@ def _pid_is_llama_server(pid):
 
 
 def server_status():
+    state_file = state_path()
     state = _read_state()
     if not state:
-        return {"state": "stopped", "managed": False}
+        return {
+            "state": "stopped",
+            "managed": False,
+            "state_file_present": state_file.exists(),
+            "log_path": str(log_path()),
+        }
     pid = state.get("pid")
-    alive = _pid_alive(pid) and _pid_is_llama_server(pid)
-    if not alive:
-        state_path().unlink(missing_ok=True)
-        return {"state": "stale", "managed": True, **state}
+    pid_alive = _pid_alive(pid)
+    correct_process = pid_alive and _pid_is_llama_server(pid)
+    if not correct_process:
+        return {
+            "state": "stale",
+            "managed": True,
+            "state_file_present": True,
+            "pid_running": pid_alive,
+            **state,
+        }
     health = probe_server(state.get("base_url", DEFAULT_LLAMACPP_BASE_URL), timeout=2)
-    return {"state": "ready" if health["ready"] else "starting", "managed": True, **state, "health": health}
+    return {
+        "state": "running",
+        "managed": True,
+        "state_file_present": True,
+        "pid_running": True,
+        **state,
+        "health": health,
+    }
 
 
 def probe_server(base_url=DEFAULT_LLAMACPP_BASE_URL, timeout=2):
@@ -278,6 +389,37 @@ def _port_available(host, port):
             return False
 
 
+def recent_log_lines(limit=30, path: str | Path | None = None):
+    """Return recent managed log lines without raising for missing/unreadable files."""
+    target = Path(path) if path else log_path()
+    try:
+        if not target.is_file():
+            return []
+        with target.open("r", encoding="utf-8", errors="replace") as handle:
+            return list(deque(handle, maxlen=max(0, limit)))
+    except OSError:
+        return []
+
+
+def startup_failure_message(message, path: str | Path | None = None, limit=30):
+    lines = recent_log_lines(limit, path)
+    output = [message, "", "Last log lines:"]
+    output.extend(line.rstrip("\n") for line in lines)
+    if not lines:
+        output.append("No managed llama.cpp server log is available.")
+    joined = "\n".join(lines).lower()
+    suggestions = ["Check that the model path exists.", "Reduce context size.", "Reduce batch size.", "Verify the llama.cpp build matches your CPU/GPU setup."]
+    if "out of memory" in joined or "cudamalloc failed" in joined:
+        suggestions.extend(["Increase --n-cpu-moe or use a lower quantization."])
+    if "unknown argument" in joined:
+        suggestions.append("The llama.cpp version may be too old or new for one of these flags.")
+    if "failed to load model" in joined:
+        suggestions.append("Verify the GGUF path and that the file finished downloading.")
+    suggestions.append("Try: local-code llama command --profile <profile> --gpu <gpu>")
+    output.extend(["", "Suggested fixes:"] + [f"- {item}" for item in dict.fromkeys(suggestions)])
+    return "\n".join(output)
+
+
 def start_server(
     profile_id: str,
     gpu: str,
@@ -290,49 +432,33 @@ def start_server(
 ):
     """Start an external llama-server after explicit user action."""
     existing = server_status()
-    if existing["state"] in {"ready", "starting"}:
+    if existing["state"] in {"running", "starting", "ready"}:
         raise RuntimeError(f"A managed llama-server is already {existing['state']} (PID {existing.get('pid')}).")
-    binary = find_llama_server(executable)
-    if not binary:
-        raise FileNotFoundError(
-            "llama-server was not found. Install llama.cpp separately, set LLAMA_SERVER, pass --llama-server, "
-            "or run `local-code llama install --url URL` for a prebuilt binary."
-        )
-    path = resolve_model_path(profile_id, model_path)
+    prepared = prepare_server_start(
+        profile_id, gpu, model_path=model_path, executable=executable, host=host, port=port,
+    )
     if not _port_available(host, port):
         raise RuntimeError(f"{host}:{port} is already in use. Stop the existing server or choose --port.")
-    args = generate_llama_server_args(profile_id, gpu, path, host=host, port=port, executable=binary)
     directory = runtime_dir()
     directory.mkdir(parents=True, exist_ok=True)
-    log_path = directory / "server.log"
-    log = log_path.open("ab", buffering=0)
+    target_log = Path(prepared["log_path"])
+    log = target_log.open("ab", buffering=0)
     try:
         process = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            close_fds=True,
+            prepared["args"], stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
+            start_new_session=True, close_fds=True,
         )
     finally:
         log.close()
-    connect_host = "127.0.0.1" if host in {"0.0.0.0", "::"} else host
-    base_url = f"http://{connect_host}:{port}/v1"
+    args = prepared["args"]
     state = {
+        **prepared,
         "pid": process.pid,
-        "profile": model_key(profile_id),
-        "model_path": path,
-        "executable": binary,
-        "base_url": base_url,
-        "host": host,
-        "port": port,
         "gpu": gpu,
         "context": int(args[args.index("-c") + 1]),
-        "log_path": str(log_path),
         "started_at": int(time.time()),
-        "args": args,
     }
+    state.pop("command", None)
     try:
         _write_state(state)
     except BaseException:
@@ -340,15 +466,27 @@ def start_server(
         raise
     deadline = time.monotonic() + max(0, wait_timeout)
     last_health = {"ready": False}
-    while time.monotonic() <= deadline:
+    while True:
         if process.poll() is not None:
             state_path().unlink(missing_ok=True)
-            raise RuntimeError(f"llama-server exited with code {process.returncode}. See {log_path}.")
-        last_health = probe_server(base_url)
+            raise RuntimeError(startup_failure_message(
+                f"llama-server failed to start. Process exited with code {process.returncode}.", target_log,
+            ))
+        last_health = probe_server(prepared["base_url"])
         if last_health["ready"]:
-            return {"state": "ready", "managed": True, **state, "health": last_health}
+            return {"state": "running", "managed": True, **state, "health": last_health}
+        if time.monotonic() >= deadline:
+            break
         time.sleep(0.25)
-    return {"state": "starting", "managed": True, **state, "health": last_health}
+    try:
+        process.terminate()
+    except (AttributeError, OSError):
+        pass
+    state_path().unlink(missing_ok=True)
+    raise RuntimeError(startup_failure_message(
+        f"llama-server failed to become healthy within {wait_timeout:g} seconds. Last health error: {last_health.get('error', 'unknown')}",
+        target_log,
+    ))
 
 
 def stop_server(timeout=10):

@@ -291,3 +291,43 @@ Before delegated repo work starts, `local-code` now runs a compact intent-analys
 Backend tools are defined once in a canonical registry and rendered into both the legacy JSON prompt protocol and Ollama/OpenAI-style function schemas. The default remains `--tool-calling json` for broad local-model compatibility; `native` requires structured tool calls, and `auto` tries native tool calls before falling back to JSON. Tool calls are validated against the registry before dispatch in all modes.
 
 See [CLAUDE.md](CLAUDE.md) for full architecture notes.
+
+## Managed llama.cpp workflow
+
+llama.cpp remains an **external inference runtime**: it loads GGUF files and
+owns quantization, KV cache, batching, and CPU/GPU offload. local-code only
+provides a registry, lifecycle convenience commands, diagnostics, routing, and
+benchmarks. llama.cpp must be installed separately, or installed from a
+user-selected prebuilt binary URL with the helper.
+
+```bash
+local-code llama install --url https://example.invalid/llama-server
+local-code model register qwen36 --path ~/Models/qwen.gguf --provider llamacpp
+local-code model start qwen36
+local-code llama doctor
+local-code bench --provider llamacpp --model local
+local-code llama logs
+local-code model stop qwen36
+```
+
+Use `local-code model start qwen36 --dry-run` to inspect the executable, model,
+port, generated arguments, log, and state paths without launching anything.
+Use `local-code llama logs --tail 50` or `local-code llama logs --follow` for a
+managed server. Logs and state are under
+`~/.local-code/runtimes/llamacpp/`. `local-code model remove qwen36`
+unregisters a model but keeps its GGUF; add `--delete-file` (and optionally
+`--yes`) only when the file should also be deleted.
+
+Manual mode is equally supported. Start `llama-server` yourself, then select
+the external provider for each invocation (or persist equivalent values in
+your local wrapper/configuration):
+
+```bash
+llama-server -m ~/Models/qwen.gguf --host 127.0.0.1 --port 8080 ...
+local-code --provider llamacpp --base-url http://127.0.0.1:8080/v1 --model local
+```
+
+local-code cannot discover logs for manually started servers. Large MoE models
+are heavy, experimental backends; on 8–12 GB GPUs, avoid frequent model
+switching and increase context or batch sizes only after measuring a stable
+baseline.

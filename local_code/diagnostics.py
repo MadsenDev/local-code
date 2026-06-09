@@ -6,6 +6,7 @@ import json
 import statistics
 import time
 from dataclasses import asdict, dataclass
+from pathlib import Path
 
 from .hardware import detect_hardware, recommend_routing
 from .llama_runtime import server_status
@@ -49,6 +50,7 @@ def doctor_report(provider, frontend_model, backend_model, num_ctx=16384):
     if is_llamacpp:
         report.update(_llamacpp_doctor(provider, backend_model, available, listed_models))
         report["managed_runtime"] = server_status()
+        report["configuration"] = {"provider": "llamacpp", "base_url": base_url, "model": backend_model}
     return report
 
 
@@ -56,9 +58,11 @@ def _llamacpp_doctor(provider, model, available, listed_models):
     chat_ok = False
     chat_error = None
     response_preview = None
+    chat_latency_s = None
     if available:
         test_model = model if model in listed_models or not listed_models else listed_models[0]
         try:
+            started = time.perf_counter()
             result = provider.chat_result(
                 test_model,
                 [{"role": "user", "content": "Reply with exactly: ready"}],
@@ -66,6 +70,7 @@ def _llamacpp_doctor(provider, model, available, listed_models):
                 num_ctx=256,
                 timeout=30,
             )
+            chat_latency_s = round(time.perf_counter() - started, 3)
             response_preview = result.content[:200]
             chat_ok = bool(result.content or result.tool_calls)
             if not chat_ok:
@@ -86,6 +91,7 @@ def _llamacpp_doctor(provider, model, available, listed_models):
         "chat_completions": chat_ok,
         "chat_error": chat_error,
         "chat_response_preview": response_preview,
+        "chat_latency_s": chat_latency_s,
         "server_metadata": metadata,
     }
 
@@ -196,45 +202,70 @@ def _benchmark_assessment(latency, tps):
 
 def format_doctor(report):
     hardware = report["hardware"]
-    lines = [
-        "Local-Code doctor",
-        f"Provider: {report['provider']} ({'reachable' if report['provider_available'] else 'unreachable'})",
-    ]
-    if report.get("base_url"):
-        lines.append(f"Base URL: {report['base_url']}")
+    lines = ["Local-Code doctor"]
     if report.get("provider_type") == "llamacpp":
+        runtime = report.get("managed_runtime") or {}
+        state = runtime.get("state", "stopped")
+        model_path = runtime.get("model_path")
         lines.extend([
-            f"llama.cpp readiness: {report['readiness']}",
-            f"GET /v1/models: {'ok' if report['models_endpoint'] else 'failed'}",
-            f"POST /v1/chat/completions: {'ok' if report['chat_completions'] else 'failed'}",
-            "Reported models: " + (", ".join(report["reported_models"]) or "none"),
+            "",
+            "Managed runtime:",
+            f"- state file: {'present' if runtime.get('state_file_present') else 'missing'}",
+            f"- PID: {runtime.get('pid', 'none')} ({'running' if runtime.get('pid_running') else state})",
+            f"- status: {state}",
+            f"- readiness: {report.get('readiness', 'unknown')}",
+            f"- executable path: {runtime.get('executable', 'not recorded')}",
+            f"- model path: {model_path or 'not recorded'}" + (" (missing)" if model_path and not Path(model_path).is_file() else ""),
+            f"- log path: {runtime.get('log_path', 'not recorded')}",
+            "",
+            "HTTP provider:",
+            f"- base URL: {report.get('base_url') or 'not configured'}",
+            f"- base URL reachable: {'yes' if report.get('provider_available') else 'no'}",
+            f"- /v1/models: {'responded' if report.get('models_endpoint') else 'failed'}",
+            "- model name returned: " + (", ".join(report.get("reported_models") or []) or "none"),
+            "",
+            "Chat completion:",
+            f"- tiny test prompt: {'succeeded' if report.get('chat_completions') else 'failed'}",
+            f"- latency: {report['chat_latency_s']} s" if report.get("chat_latency_s") is not None else "- latency: not measured",
         ])
         if report.get("chat_error"):
-            lines.append(f"Chat error: {report['chat_error']}")
-        metadata = report.get("server_metadata") or {}
-        if metadata:
-            lines.append("Server metadata: " + ", ".join(sorted(metadata)))
-        runtime = report.get("managed_runtime") or {}
-        if runtime.get("managed"):
-            lines.append(f"Managed runtime: {runtime.get('state')} (PID {runtime.get('pid', 'unknown')})")
-        if report["readiness"] == "unreachable":
+            lines.append(f"- error: {report['chat_error']}")
+        config = report.get("configuration") or {}
+        lines.extend([
+            "",
+            "Configuration:",
+            f"- configured provider name: {config.get('provider') or 'missing'}",
+            f"- configured base_url: {config.get('base_url') or 'missing'}",
+            f"- configured model: {config.get('model') or 'missing'}",
+        ])
+        if state == "stale":
+            lines.append("- action: stale PID/state detected; run `local-code model stop` to clean it up before restarting.")
+        if not report.get("provider_available"):
             lines.extend([
-                f"llama.cpp provider is configured, but no server responded at {report['base_url']}.",
-                "Start llama-server first, or change the base_url in your config.",
-                "Run: local-code model start qwen36 --gpu rtx3060",
-                "Or print flags: local-code llama command --profile qwen36-35b-a3b --gpu rtx3060",
+                "",
+                "The llama.cpp HTTP endpoint is unreachable. The process may be stopped, still loading, or using a different port/base URL.",
+                "Next: run `local-code model status`, then `local-code llama logs --tail 50`.",
+                "To start a registered model: local-code model start qwen36 --gpu rtx3060",
             ])
+        elif report.get("models_endpoint") and not report.get("chat_completions"):
+            lines.append("The models endpoint works, but chat completions fail; inspect the chat error and managed log.")
+    else:
+        lines.extend([
+            f"Provider: {report['provider']} ({'reachable' if report['provider_available'] else 'unreachable'})",
+            f"Base URL: {report['base_url']}" if report.get("base_url") else "",
+        ])
+    lines.append("")
     lines.append(f"System RAM: {hardware['system_ram_gb'] or 'unknown'} GB")
     for gpu in hardware["gpus"]:
         lines.append(f"GPU: {gpu['name']} — {gpu['vram_total_gb'] or 'unknown'} GB VRAM ({gpu['vram_used_gb'] or 0} GB used)")
     if not hardware["gpus"]:
         lines.append("GPU: not detected")
     for model, available in report["models"].items():
-        state = "available" if available is True else "missing" if available is False else "unknown"
-        lines.append(f"Model: {model} — {state}")
+        status = "available" if available is True else "missing" if available is False else "unknown"
+        lines.append(f"Model: {model} — {status}")
     route = report["routing_recommendation"]
     lines.extend([f"Recommended routing: {route['mode']}", f"Reason: {route['reason']}", f"Context window: {report['num_ctx']:,} tokens"])
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line is not None)
 
 
 def format_benchmark(report):
