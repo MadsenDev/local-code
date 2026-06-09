@@ -202,7 +202,7 @@ def _benchmark_assessment(latency, tps):
 
 def format_doctor(report):
     hardware = report["hardware"]
-    lines = ["Local-Code doctor"]
+    lines = ["Rist doctor"]
     if report.get("provider_type") == "llamacpp":
         runtime = report.get("managed_runtime") or {}
         state = runtime.get("state", "stopped")
@@ -239,13 +239,13 @@ def format_doctor(report):
             f"- configured model: {config.get('model') or 'missing'}",
         ])
         if state == "stale":
-            lines.append("- action: stale PID/state detected; run `local-code model stop` to clean it up before restarting.")
+            lines.append("- action: stale PID/state detected; run `rist model stop` to clean it up before restarting.")
         if not report.get("provider_available"):
             lines.extend([
                 "",
                 "The llama.cpp HTTP endpoint is unreachable. The process may be stopped, still loading, or using a different port/base URL.",
-                "Next: run `local-code model status`, then `local-code llama logs --tail 50`.",
-                "To start a registered model: local-code model start qwen36 --gpu rtx3060",
+                "Next: run `rist model status`, then `rist llama logs --tail 50`.",
+                "To start a registered model: rist model start qwen36 --gpu rtx3060",
             ])
         elif report.get("models_endpoint") and not report.get("chat_completions"):
             lines.append("The models endpoint works, but chat completions fail; inspect the chat error and managed log.")

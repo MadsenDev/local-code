@@ -101,7 +101,7 @@ class UI:
         else:
             model_note = self.style(f"  ·  {frontend_model}", self.DIM)
         return (
-            self.style("local-code", self.BOLD)
+            self.style("Rist", self.BOLD)
             + "  "
             + self.style(mode, self.BOLD, color)
             + self.style(f"  ·  {repo}/{branch} ({changes})", self.DIM)

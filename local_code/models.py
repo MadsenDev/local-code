@@ -65,7 +65,7 @@ def _raw_post(ollama_base_url, payload, timeout):
     req = urllib.request.Request(
         f"{ollama_base_url.rstrip('/')}/api/chat",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "local-code/0.2"},
+        headers={"Content-Type": "application/json", "User-Agent": "rist/0.2"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -150,7 +150,7 @@ def ollama_stream(ollama_base_url, model, messages, timeout=MODEL_REQUEST_TIMEOU
     req = urllib.request.Request(
         f"{ollama_base_url.rstrip('/')}/api/chat",
         data=json.dumps(payload).encode("utf-8"),
-        headers={"Content-Type": "application/json", "User-Agent": "local-code/0.2"},
+        headers={"Content-Type": "application/json", "User-Agent": "rist/0.2"},
         method="POST",
     )
     with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -175,7 +175,7 @@ def server_available(ollama_base_url, timeout=5):
     try:
         req = urllib.request.Request(
             f"{ollama_base_url.rstrip('/')}/api/version",
-            headers={"User-Agent": "local-code/0.2"},
+            headers={"User-Agent": "rist/0.2"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             json.load(resp)
@@ -189,7 +189,7 @@ def list_models(ollama_base_url, timeout=10):
     try:
         req = urllib.request.Request(
             f"{ollama_base_url.rstrip('/')}/api/tags",
-            headers={"User-Agent": "local-code/0.2"},
+            headers={"User-Agent": "rist/0.2"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             data = json.load(resp)

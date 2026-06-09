@@ -22,10 +22,12 @@ from collections import deque
 from pathlib import Path
 
 from .llamacpp import DEFAULT_LLAMACPP_BASE_URL, generate_llama_server_args, get_llamacpp_profile
+from .paths import migrate_registry_location, rist_home
 
 
 def local_code_home() -> Path:
-    return Path(os.environ.get("LOCAL_CODE_HOME", Path.home() / ".local-code")).expanduser()
+    """Compatibility name for the Rist user-data directory."""
+    return rist_home()
 
 
 def runtime_dir() -> Path:
@@ -45,7 +47,9 @@ def state_path() -> Path:
 
 
 def registry_path() -> Path:
-    return models_dir() / "models.json"
+    home = local_code_home()
+    migrate_registry_location(home)
+    return home / "models.json"
 
 
 def find_llama_server(explicit: str | None = None) -> str | None:
@@ -79,7 +83,7 @@ def _download(url: str, destination: Path, *, sha256: str | None = None, force=F
     digest = hashlib.sha256()
     downloaded = 0
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "local-code/0.2"})
+        req = urllib.request.Request(url, headers={"User-Agent": "rist/0.2"})
         with urllib.request.urlopen(req, timeout=timeout) as response, partial.open("wb") as output:
             total_header = response.headers.get("Content-Length")
             total = int(total_header) if total_header and total_header.isdigit() else None
@@ -252,7 +256,7 @@ def prepare_server_start(
     if not binary:
         raise FileNotFoundError(
             "llama-server was not found. Install llama.cpp separately, set LLAMA_SERVER, pass --llama-server, "
-            "or run `local-code llama install --url URL` for a prebuilt binary."
+            "or run `rist llama install --url URL` for a prebuilt binary."
         )
     path = resolve_model_path(profile_id, model_path)
     if Path(path).suffix.lower() != ".gguf":
@@ -283,7 +287,7 @@ def resolve_model_path(profile_id: str, explicit: str | None = None) -> str:
         path = Path(entry.get("path", "")) if entry.get("path") else None
     if not path or not path.is_file():
         raise FileNotFoundError(
-            f"No installed GGUF for {profile_id!r}. Run `local-code model install {profile_id} --url URL`, "
+            f"No installed GGUF for {profile_id!r}. Run `rist model install {profile_id} --url URL`, "
             "or pass --model-path /path/to/model.gguf."
         )
     return str(path.resolve())
@@ -371,7 +375,7 @@ def server_status():
 
 def probe_server(base_url=DEFAULT_LLAMACPP_BASE_URL, timeout=2):
     try:
-        req = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers={"User-Agent": "local-code/0.2"})
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/models", headers={"User-Agent": "rist/0.2"})
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.load(response)
         models = [item.get("id") for item in data.get("data", []) if item.get("id")]
@@ -415,7 +419,7 @@ def startup_failure_message(message, path: str | Path | None = None, limit=30):
         suggestions.append("The llama.cpp version may be too old or new for one of these flags.")
     if "failed to load model" in joined:
         suggestions.append("Verify the GGUF path and that the file finished downloading.")
-    suggestions.append("Try: local-code llama command --profile <profile> --gpu <gpu>")
+    suggestions.append("Try: rist llama command --profile <profile> --gpu <gpu>")
     output.extend(["", "Suggested fixes:"] + [f"- {item}" for item in dict.fromkeys(suggestions)])
     return "\n".join(output)
 
@@ -490,7 +494,7 @@ def start_server(
 
 
 def stop_server(timeout=10):
-    """Stop only the llama-server process recorded as managed by local-code."""
+    """Stop only the llama-server process recorded as managed by Rist."""
     state = _read_state()
     if not state:
         return {"state": "stopped", "managed": False, "message": "No managed llama-server is running."}

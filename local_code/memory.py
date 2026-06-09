@@ -1,13 +1,18 @@
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
-from .config import MAX_HISTORY_MESSAGES, MEMORY_DIR_NAME
+from .config import LEGACY_MEMORY_DIR_NAME, MAX_HISTORY_MESSAGES, MEMORY_DIR_NAME
 from .ui import clip
 
 
 def memory_paths(workdir):
-    base = Path(workdir) / MEMORY_DIR_NAME
+    root = Path(workdir)
+    base = root / MEMORY_DIR_NAME
+    legacy = root / LEGACY_MEMORY_DIR_NAME
+    if not base.exists() and legacy.is_dir():
+        shutil.copytree(legacy, base)
     return {
         "base": base,
         "project": base / "project.md",
@@ -58,9 +63,9 @@ def ensure_git_exclude(workdir):
     try:
         exclude_path.parent.mkdir(parents=True, exist_ok=True)
         existing = exclude_path.read_text(encoding="utf-8", errors="replace") if exclude_path.exists() else ""
-        if ".local-code/" not in existing:
+        if f"{MEMORY_DIR_NAME}/" not in existing:
             suffix = "" if existing.endswith("\n") or not existing else "\n"
-            exclude_path.write_text(existing + suffix + ".local-code/\n", encoding="utf-8")
+            exclude_path.write_text(existing + suffix + f"{MEMORY_DIR_NAME}/\n", encoding="utf-8")
     except Exception:  # noqa: BLE001
         return
 

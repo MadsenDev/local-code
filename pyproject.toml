@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "local-code"
+name = "rist"
 version = "0.1.0"
-description = "Local AI coding partner for Ollama and external OpenAI-compatible servers"
+description = "Rist is a local-first AI coding agent for real developer hardware"
 requires-python = ">=3.11"
 dependencies = []
 
@@ -25,6 +25,7 @@ dev = [
 ]
 
 [project.scripts]
+rist = "local_code.cli:main"
 local-code = "local_code.cli:main"
 
 [tool.pytest.ini_options]

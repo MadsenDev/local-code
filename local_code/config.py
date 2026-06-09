@@ -14,7 +14,8 @@ DEFAULT_OLLAMA = "http://127.0.0.1:11434"
 MAX_TOOL_STEPS = 100
 MAX_OUTPUT_CHARS = 12000
 MAX_HISTORY_MESSAGES = 40
-MEMORY_DIR_NAME = ".local-code"
+MEMORY_DIR_NAME = ".rist"
+LEGACY_MEMORY_DIR_NAME = ".local-code"
 
 # --- Model generation / reliability layer -------------------------------
 # Context window requested from Ollama. 16k fits comfortably alongside a

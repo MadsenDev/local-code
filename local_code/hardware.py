@@ -109,7 +109,7 @@ def _amd_gpus():
 
 def loaded_ollama_models(base_url, timeout=2):
     try:
-        req = urllib.request.Request(f"{base_url.rstrip('/')}/api/ps", headers={"User-Agent": "local-code/0.2"})
+        req = urllib.request.Request(f"{base_url.rstrip('/')}/api/ps", headers={"User-Agent": "rist/0.2"})
         with urllib.request.urlopen(req, timeout=timeout) as response:
             data = json.load(response)
     except Exception:  # best-effort diagnostic probe

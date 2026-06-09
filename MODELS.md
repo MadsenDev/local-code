@@ -1,6 +1,6 @@
 # Model performance requirements
 
-`local-code` is designed to work well across a wide range of local models, but
+Rist is designed to work well across a wide range of local models, but
 **below a certain capability it stops being reliable** — the backend tool loop
 needs a model that can consistently emit a valid tool call, follow a contract,
 and know when to stop. This document defines the recommended-minimum standard,
@@ -45,7 +45,7 @@ Two configurations that work on a 3060 12 GB:
   (~3 GB + ~5 GB ≈ 8 GB, both stay resident).
 
 Avoid pairing two large distinct models (e.g. `qwen3:8b` + `qwen2.5-coder:14b` ≈
-22 GB combined) on this card. `local-code` warns about this at startup.
+22 GB combined) on this card. Rist warns about this at startup.
 
 
 ## Experimental large GGUF/MoE models through llama.cpp
@@ -63,9 +63,9 @@ weights and KV cache still matter even when only a small subset of MoE experts
 is active, so performance depends heavily on quant, RAM bandwidth, offload, and
 context length.
 
-**local-code does not replace llama.cpp. local-code manages and connects to
+**Rist does not replace llama.cpp. Rist manages and connects to
 llama.cpp.** llama.cpp remains responsible for GGUF parsing, quantization,
-GPU/CPU execution, expert placement, batching, and KV cache. local-code may
+GPU/CPU execution, expert placement, batching, and KV cache. Rist may
 manage the external executable's lifecycle and model files after explicit
 `model install/register/start/stop` commands. It never compiles llama.cpp or
 implements inference. See the README for lifecycle commands, diagnostics,
@@ -111,13 +111,13 @@ These are automatic — you don't configure them:
 
 The tiers above are for **local** models on a 12 GB card. With
 `--provider openrouter` (or any OpenAI-compatible endpoint), the model runs in
-the cloud, so VRAM fit and the few-shot scaffolding don't apply — local-code
+the cloud, so VRAM fit and the few-shot scaffolding don't apply — Rist
 skips them automatically. Structured output, retries, and the tool loop work
 identically. Pick any capable instruct/coder model the provider offers, e.g.:
 
 ```bash
 export OPENROUTER_API_KEY=sk-or-...
-local-code --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
+rist --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
 ```
 
 ## Measuring a model yourself
@@ -137,23 +137,23 @@ fail often and is below the bar.
 ## Managed llama.cpp workflow on RTX 3060-class hardware
 
 llama.cpp is external software and performs all GGUF loading and inference.
-local-code can register a GGUF and manage a `llama-server` process for
+Rist can register a GGUF and manage a `llama-server` process for
 convenience, but it does not parse the model or perform inference itself.
 
 ```bash
-local-code llama install --url https://example.invalid/llama-server
-local-code model register qwen36 --path ~/Models/qwen.gguf --provider llamacpp
-local-code model start qwen36 --gpu rtx3060
-local-code llama doctor
-local-code bench --provider llamacpp --model local
-local-code llama logs --tail 50
-local-code model stop qwen36
+rist llama install --url https://example.invalid/llama-server
+rist model register qwen36 --path ~/Models/qwen.gguf --provider llamacpp
+rist model start qwen36 --gpu rtx3060
+rist llama doctor
+rist bench --provider llamacpp --model local
+rist llama logs --tail 50
+rist model stop qwen36
 ```
 
-Managed logs and state live in `~/.local-code/runtimes/llamacpp/`. To run
-manually instead, launch `llama-server` yourself and invoke local-code with
+Managed logs and state live in `~/.rist/runtimes/llamacpp/`. To run
+manually instead, launch `llama-server` yourself and invoke Rist with
 `--provider llamacpp --base-url http://127.0.0.1:8080/v1 --model local`.
-local-code only has log visibility for servers it starts.
+Rist only has log visibility for servers it starts.
 
 For an RTX 3060 12 GB, begin with the conservative 16k-context `rtx3060`
 profile. Context above 32k is experimental on 12 GB VRAM, and large MoE GGUFs

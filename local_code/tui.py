@@ -1,4 +1,4 @@
-"""Full-screen Textual TUI for local-code.
+"""Full-screen Textual TUI for Rist.
 
 This is the default interactive experience. It drives the same `LocalPartner`
 as the plain REPL, but renders the conversation, live token streaming, tool
@@ -112,9 +112,9 @@ class LocalCodeApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
-        self.title = "local-code"
+        self.title = "Rist"
         log = self.query_one("#log", RichLog)
-        log.write(Panel(Markdown(f"Welcome to **local-code**. Mode: `{self.partner.mode}`. Type `/help` for commands."), border_style="cyan"))
+        log.write(Panel(Markdown(f"Welcome to **Rist**. Mode: `{self.partner.mode}`. Type `/help` for commands."), border_style="cyan"))
         self.query_one("#input", Input).focus()
 
     # -- status bar -----------------------------------------------------
@@ -336,7 +336,7 @@ class LocalCodeApp(App):
         if error is not None:
             log.write(Panel(Text(error, style="red"), title="error", border_style="red"))
         elif reply:
-            log.write(Panel(Markdown(reply), title="local-code", title_align="left", border_style="green"))
+            log.write(Panel(Markdown(reply), title="Rist", title_align="left", border_style="green"))
         self._write_report_extras()
         log.scroll_end(animate=False)
         self.partner.on_token = None

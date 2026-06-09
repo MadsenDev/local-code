@@ -60,7 +60,7 @@ BOOTSTRAP_RISKY_RE = re.compile(r"\b(monorepo|workspace|docker|deploy|production
 
 def inspect_workdir_state(workdir):
     root = Path(workdir)
-    entries = [p for p in root.iterdir() if p.name not in {".git", ".local-code"}]
+    entries = [p for p in root.iterdir() if p.name not in {".git", ".rist", ".local-code"}]
     files = [p for p in entries if p.is_file()]
     dirs = [p for p in entries if p.is_dir()]
     markers = []
