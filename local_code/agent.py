@@ -39,6 +39,7 @@ from .contracts import (
     resolve_repo_file_hints,
     unwrap_frontend_reply_text,
 )
+from .intelligence import IntelligenceStore, atomic_write_text
 from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
 from .permissions import command_is_blocked, confirm_action
 from .tool_specs import native_tool_definitions, tool_prompt_lines, validate_tool_call
@@ -1630,7 +1631,8 @@ class LocalPartner:
                 f"Current project.md:\n{current}\n\n"
                 f"Recent runs:\n{recent}\n\n"
                 "Rules: only add new reusable facts (commands, key files, stack, patterns). "
-                "Keep each addition to one line. Do not remove existing entries. "
+                "Keep each addition to one bullet line under the existing sections. "
+                "Preserve rist metadata comments and headings. Do not remove existing entries. "
                 "Return ONLY the full updated file content, no explanation."
             ),
         }]
@@ -1638,7 +1640,8 @@ class LocalPartner:
             updated = self.provider.chat(self.backend_model, messages)
         updated = updated.strip()
         if updated and updated != current:
-            paths["project"].write_text(updated + "\n", encoding="utf-8")
+            atomic_write_text(paths["project"], updated + "\n")
+            IntelligenceStore.load(paths["base"], sync_views=True)
             self.milestone("project memory updated")
 
     def apply_pending_plan(self):
