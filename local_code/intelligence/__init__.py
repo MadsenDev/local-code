@@ -1,5 +1,8 @@
 """Structured, durable repository intelligence and editable Markdown views."""
 
+from .decisions import (
+    Decision, DecisionCandidate, DecisionConflict, DecisionService, DecisionStatus, execute_decision_command, stable_decision_id,
+)
 from .graph import (
     DependencyGraph,
     EdgeKind,
@@ -48,6 +51,13 @@ from .storage import (
 )
 
 __all__ = [
+    "Decision",
+    "DecisionCandidate",
+    "DecisionConflict",
+    "DecisionService",
+    "DecisionStatus",
+    "stable_decision_id",
+    "execute_decision_command",
     "DependencyGraph",
     "EdgeKind",
     "Evidence",

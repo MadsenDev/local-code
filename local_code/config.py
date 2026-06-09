@@ -71,6 +71,7 @@ HELP_TEXT = """Commands:
 /undo                         Revert files changed by the last execute run
 /status                       Show current settings
 /models                       Show model tiers and the recommended-minimum standard
+/decisions ACTION ...         List, add, accept, supersede, or review decisions
 /context                      Show context-window accounting
 /routing MODE                 Set model routing: single, adaptive, dual
 /quit                         Exit

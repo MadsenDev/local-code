@@ -93,3 +93,19 @@ def test_confirm_screen_returns_bool_on_keys(tmp_path):
             assert results == [True]
 
     asyncio.run(inner())
+
+
+def test_slash_decisions_lists_records(tmp_path):
+    async def inner():
+        partner = _partner(tmp_path)
+        item = partner.decisions.add(title="Use SQLite", rationale="Local storage")
+        partner.decisions.accept(item.id)
+        app = LocalCodeApp(partner)
+        async with app.run_test() as pilot:
+            app.query_one("#input").value = "/decisions list"
+            await pilot.press("enter")
+            await pilot.pause()
+            assert app._busy is False
+            assert item.id in "".join(strip.text for strip in app.query_one("#log").lines)
+
+    asyncio.run(inner())
