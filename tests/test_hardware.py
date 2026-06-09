@@ -32,3 +32,13 @@ def test_adaptive_single_prefers_backend_capability():
     frontend, backend, decision = resolve_model_routing("adaptive", True, hardware(8), "talker:4b", "coder:14b")
     assert frontend == backend == "coder:14b"
     assert decision["mode"] == "single"
+
+
+def test_adaptive_heavy_provider_stays_on_backend_for_whole_phase():
+    frontend, backend, decision = resolve_model_routing(
+        "adaptive", True, hardware(12), "small:4b", "local", provider_is_heavy=True
+    )
+    assert frontend == backend == "local"
+    assert decision["mode"] == "single"
+    assert decision["phase_strategy"] == "heavy_phase"
+    assert "ping-pong" in decision["reason"]

@@ -47,6 +47,35 @@ Two configurations that work on a 3060 12 GB:
 Avoid pairing two large distinct models (e.g. `qwen3:8b` + `qwen2.5-coder:14b` ≈
 22 GB combined) on this card. `local-code` warns about this at startup.
 
+
+## Experimental large GGUF/MoE models through llama.cpp
+
+The local Ollama fit tiers above describe models expected to stay mostly on the
+reference GPU. Larger GGUF and MoE models have a separate deployment class:
+`provider: llamacpp`, `role: heavy_backend`, `recommended_routing: single`, and
+`status: experimental`.
+
+The built-in `qwen36-35b-a3b-llamacpp` profile targets repo analysis, debugging
+logs, code review, planning, and multi-file reasoning. Its guidance is 8 GB
+minimum / 12 GB recommended VRAM, 32 GB recommended / 64 GB ideal system RAM.
+Avoid it for quick chat, rapid tool loops, or frequent model switching. Total
+weights and KV cache still matter even when only a small subset of MoE experts
+is active, so performance depends heavily on quant, RAM bandwidth, offload, and
+context length.
+
+**local-code does not replace llama.cpp. local-code manages and connects to
+llama.cpp.** llama.cpp remains responsible for GGUF parsing, quantization,
+GPU/CPU execution, expert placement, batching, and KV cache. local-code may
+manage the external executable's lifecycle and model files after explicit
+`model install/register/start/stop` commands. It never compiles llama.cpp or
+implements inference. See the README for lifecycle commands, diagnostics,
+benchmarks, and conservative RTX 3060 settings.
+
+Adaptive routing pins a llama.cpp heavy backend for the complete heavy phase.
+It intentionally avoids repeated `small → big → small → big` transitions. If a
+small default model is used outside that phase, use it for initial routing and
+optional final summarization—not alternating tool steps.
+
 ## How the app adapts to weaker models
 
 These are automatic — you don't configure them:

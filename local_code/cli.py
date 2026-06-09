@@ -21,6 +21,16 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
+from .llamacpp import format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
+from .llama_runtime import (
+    install_llama_server,
+    install_model,
+    list_managed_models,
+    register_model,
+    server_status,
+    start_server,
+    stop_server,
+)
 from .diagnostics import benchmark_model, doctor_report, format_benchmark, format_doctor, to_json
 from .hardware import detect_hardware
 from .routing import resolve_model_routing
@@ -55,7 +65,14 @@ except Exception:
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Local-first coding agent with hardware-aware model routing.")
-    parser.add_argument("command", nargs="?", choices=["doctor", "benchmark"], help="Run diagnostics or a local inference benchmark")
+    parser.add_argument("command", nargs="?", choices=["doctor", "benchmark", "bench", "llama", "model"], help="Run diagnostics, benchmark, or llama.cpp helpers")
+    parser.add_argument(
+        "llama_action",
+        nargs="?",
+        choices=["doctor", "command", "install", "start", "stop", "status", "list", "register"],
+        help="llama.cpp or managed-model action",
+    )
+    parser.add_argument("model_target", nargs="?", help="Managed model profile, e.g. qwen36")
     parser.add_argument("-m", "--model", default=None, help=f"Model name override for both roles (default: role-specific)")
     parser.add_argument("--frontend-model", dest="frontend_model", default=None, help="Frontend/talker model name (falls back to --model)")
     parser.add_argument("--backend-model", dest="backend_model", default=None, help="Backend/coder model name (falls back to --model)")
@@ -71,9 +88,22 @@ def parse_args():
     parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
     parser.add_argument("--model-routing", choices=["single", "adaptive", "dual"], default=DEFAULT_MODEL_ROUTING, help=f"Model residency/routing strategy ({DEFAULT_MODEL_ROUTING})")
-    parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs (3)")
+    parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs per prompt size (3)")
+    parser.add_argument("--long-context", action="store_true", help="Include an optional long-context benchmark prompt")
+    parser.add_argument("--profile", default="qwen36-35b-a3b", help="llama.cpp command profile")
+    parser.add_argument("--gpu", default="rtx3060", help="llama.cpp hardware profile")
+    parser.add_argument("--model-path", default=None, help="GGUF path to print in the suggested llama-server command")
+    parser.add_argument("--url", default=None, help="Explicit URL for a model GGUF or prebuilt llama-server binary")
+    parser.add_argument("--sha256", default=None, help="Expected SHA-256 for a downloaded artifact")
+    parser.add_argument("--filename", default=None, help="Destination filename for a downloaded GGUF")
+    parser.add_argument("--destination", default=None, help="Destination path for a downloaded llama-server binary")
+    parser.add_argument("--force", action="store_true", help="Replace an existing downloaded artifact")
+    parser.add_argument("--llama-server", dest="llama_server", default=None, help="Path to the external llama-server executable")
+    parser.add_argument("--host", default="127.0.0.1", help="Host for a managed llama-server (127.0.0.1)")
+    parser.add_argument("--port", type=int, default=8080, help="Port for a managed llama-server (8080)")
+    parser.add_argument("--wait-timeout", type=float, default=120, help="Seconds to wait for a managed server to become ready (120)")
     parser.add_argument("--json", dest="json_output", action="store_true", help="Emit doctor/benchmark output as JSON")
-    parser.add_argument("--provider", choices=["ollama", "openrouter", "openai"], default="ollama", help="Model provider (default: ollama)")
+    parser.add_argument("--provider", choices=["ollama", "llamacpp", "openrouter", "openai"], default="ollama", help="Model provider (default: ollama)")
     parser.add_argument("--base-url", dest="base_url", default=None, help="Override the provider base URL (e.g. an OpenAI-compatible server)")
     parser.add_argument("--api-key", dest="api_key", default=None, help="API key for cloud providers (else read from env)")
     parser.add_argument("--no-preflight", dest="no_preflight", action="store_true", help="Skip the startup model/provider check")
@@ -94,17 +124,27 @@ def run_preflight(agent, verbose=False):
 
     ui = agent.ui
     if not agent.provider.available():
-        print(
-            ui.box(
-                "Ollama not reachable",
-                [
-                    f"Could not reach {agent.provider.describe()}.",
-                    "Start it with `ollama serve`, or point at it with --ollama / --base-url.",
-                ],
-                color=UI.YELLOW,
-            ),
-            file=sys.stderr,
-        )
+        if getattr(agent.provider, "name", "") == "llamacpp":
+            title = "llama.cpp not reachable"
+            details = agent.provider.failure_message().splitlines()
+        else:
+            title = "Ollama not reachable"
+            details = [
+                f"Could not reach {agent.provider.describe()}.",
+                "Start it with `ollama serve`, or point at it with --ollama / --base-url.",
+            ]
+        print(ui.box(title, details, color=UI.YELLOW), file=sys.stderr)
+        return
+
+    if getattr(agent.provider, "name", "") == "llamacpp":
+        if verbose:
+            models = sorted(agent.provider.list_models())
+            body = [
+                f"Provider: {agent.provider.describe()}",
+                "Reported models: " + (", ".join(models) or "none"),
+                "External heavy backend; run `local-code llama doctor` for a chat probe and server metadata.",
+            ]
+            print(ui.box("llama.cpp", body, color=UI.CYAN), file=sys.stderr)
         return
 
     models = list(dict.fromkeys([agent.frontend_model, agent.backend_model]))
@@ -469,6 +509,12 @@ def expand_at_references(prompt, workdir, ui):
     return prompt + "\n\n" + "\n\n".join(sections)
 
 
+def _connection_error_message(agent, exc):
+    if getattr(agent.provider, "name", "") == "llamacpp":
+        return agent.provider.failure_message()
+    return f"Connection error (is Ollama running?): {exc}"
+
+
 def interactive_loop(agent):
     print(render_header(agent))
     print(agent.ui.style("  /help for commands · /status for details", UI.DIM))
@@ -615,7 +661,7 @@ def interactive_loop(agent):
                 print("Use /routing single, /routing adaptive, or /routing dual")
                 continue
             hardware = detect_hardware(getattr(agent.provider, "base_url", None) if agent.provider.is_local else None)
-            front, back, decision = resolve_model_routing(value, agent.provider.is_local, hardware, agent.preferred_frontend_model, agent.preferred_backend_model, agent.context_limit)
+            front, back, decision = resolve_model_routing(value, agent.provider.is_local, hardware, agent.preferred_frontend_model, agent.preferred_backend_model, agent.context_limit, provider_is_heavy=getattr(agent.provider, "is_heavy_backend", False))
             agent.model_routing, agent.frontend_model, agent.backend_model, agent.routing_decision = value, front, back, decision
             agent.sync_executor()
             print(f"Model routing: {decision['mode']} — {decision['reason']}")
@@ -643,7 +689,7 @@ def interactive_loop(agent):
                 print(f"HTTP error: {exc}\n{detail}")
                 continue
             except urllib.error.URLError as exc:
-                print(f"Connection error (is Ollama running?): {exc}")
+                print(_connection_error_message(agent, exc))
                 continue
             except Exception as exc:  # noqa: BLE001
                 print(f"Error: {exc}")
@@ -662,7 +708,7 @@ def interactive_loop(agent):
                 print(f"HTTP error: {exc}\n{detail}")
                 continue
             except urllib.error.URLError as exc:
-                print(f"Connection error (is Ollama running?): {exc}")
+                print(_connection_error_message(agent, exc))
                 continue
             except Exception as exc:  # noqa: BLE001
                 print(f"Error: {exc}")
@@ -681,7 +727,7 @@ def interactive_loop(agent):
                 print(f"HTTP error: {exc}\n{detail}")
                 continue
             except urllib.error.URLError as exc:
-                print(f"Connection error (is Ollama running?): {exc}")
+                print(_connection_error_message(agent, exc))
                 continue
             except Exception as exc:  # noqa: BLE001
                 print(f"Error: {exc}")
@@ -700,7 +746,7 @@ def interactive_loop(agent):
                 print(f"HTTP error: {exc}\n{detail}")
                 continue
             except urllib.error.URLError as exc:
-                print(f"Connection error (is Ollama running?): {exc}")
+                print(_connection_error_message(agent, exc))
                 continue
             except Exception as exc:  # noqa: BLE001
                 print(f"Error: {exc}")
@@ -719,7 +765,7 @@ def interactive_loop(agent):
                 print(f"HTTP error: {exc}\n{detail}")
                 continue
             except urllib.error.URLError as exc:
-                print(f"Connection error (is Ollama running?): {exc}")
+                print(_connection_error_message(agent, exc))
                 continue
             except Exception as exc:  # noqa: BLE001
                 print(f"Error: {exc}")
@@ -747,7 +793,7 @@ def interactive_loop(agent):
                 print(f"HTTP error: {exc}\n{detail}")
                 continue
             except urllib.error.URLError as exc:
-                print(f"Connection error (is Ollama running?): {exc}")
+                print(_connection_error_message(agent, exc))
                 continue
             except Exception as exc:  # noqa: BLE001
                 print(f"Error: {exc}")
@@ -778,7 +824,7 @@ def interactive_loop(agent):
             print(f"HTTP error: {exc}\n{detail}")
             continue
         except urllib.error.URLError as exc:
-            print(f"Connection error (is Ollama running?): {exc}")
+            print(_connection_error_message(agent, exc))
             continue
         except Exception as exc:  # noqa: BLE001
             print(f"Error: {exc}")
@@ -788,14 +834,139 @@ def interactive_loop(agent):
 
 
 def _default_model_for(provider_kind):
-    # Local Ollama has a sensible default; cloud providers must be told a model.
-    return DEFAULT_MODEL if provider_kind == "ollama" else None
+    # Local servers have a sensible alias; cloud providers must be told a model.
+    if provider_kind == "ollama":
+        return DEFAULT_MODEL
+    if provider_kind == "llamacpp":
+        return "local"
+    return None
+
+
+def _print_runtime_report(report, json_output=False):
+    if json_output:
+        print(to_json(report))
+        return
+    state = report.get("state")
+    if state:
+        print(f"llama.cpp server: {state}")
+    for key, label in (
+        ("profile", "Profile"), ("pid", "PID"), ("base_url", "Provider"),
+        ("model_path", "Model"), ("executable", "Executable"),
+        ("context", "Context"), ("gpu", "GPU profile"), ("log_path", "Log"), ("message", "Message"),
+    ):
+        if report.get(key) is not None:
+            print(f"{label}: {report[key]}")
+    health = report.get("health") or {}
+    if health.get("models"):
+        print("Reported models: " + ", ".join(health["models"]))
+
+
+def _handle_runtime_command(args):
+    action = args.llama_action
+    if args.command == "llama" and action == "install":
+        if not args.url:
+            raise ValueError("`local-code llama install` requires --url for a prebuilt llama-server binary.")
+        report = install_llama_server(args.url, destination=args.destination, sha256=args.sha256, force=args.force)
+        if args.json_output:
+            print(to_json(report))
+        else:
+            print(f"Installed llama-server: {report['executable']}")
+            print(f"SHA-256: {report['sha256']}")
+        return 0
+    if args.command != "model":
+        return None
+    if action == "list":
+        models = list_managed_models()
+        if args.json_output:
+            print(to_json(models))
+        elif not models:
+            print("No managed llama.cpp models. Run: local-code model install qwen36 --url URL")
+        else:
+            for model in models:
+                state = "installed" if model["exists"] else "missing"
+                print(f"{model['id']}: {state} — {model['path']}")
+        return 0
+    if action == "status":
+        _print_runtime_report(server_status(), args.json_output)
+        return 0
+    if action == "stop":
+        _print_runtime_report(stop_server(), args.json_output)
+        return 0
+    target = args.model_target
+    if not target:
+        raise ValueError(f"`local-code model {action or 'ACTION'}` requires a profile, e.g. qwen36.")
+    if action == "install":
+        if not args.url:
+            raise ValueError("Model installation requires an explicit --url to a GGUF file; Hugging Face authentication is not managed yet.")
+        if not args.json_output:
+            profile = get_llamacpp_profile(target)
+            hardware = profile["hardware"]
+            print(f"Installing {profile['name']}...")
+            print(f"Source: {args.url}")
+            print(f"Recommended RAM: {hardware['recommended_ram_gb']} GB (ideal {hardware['ideal_ram_gb']} GB)")
+            print(f"Recommended VRAM: {hardware['recommended_vram_gb']} GB")
+        report = install_model(target, args.url, filename=args.filename, sha256=args.sha256, force=args.force)
+        if args.json_output:
+            print(to_json(report))
+        else:
+            print(f"Installed model: {report['profile']}")
+            print(f"Path: {report['path']}")
+            print(f"Size: {report['bytes'] / 1024**3:.2f} GiB")
+            print(f"SHA-256: {report['sha256']}")
+        return 0
+    if action == "register":
+        if not args.model_path:
+            raise ValueError("Model registration requires --model-path /path/to/model.gguf.")
+        report = register_model(target, args.model_path)
+        print(to_json(report) if args.json_output else f"Registered {report['profile']}: {report['path']}")
+        return 0
+    if action == "start":
+        if not args.json_output:
+            profile = get_llamacpp_profile(target)
+            detected = detect_hardware()
+            gpu_name = detected.gpus[0].name if detected.gpus else args.gpu
+            print(f"Starting {profile['name']}...")
+            print("Provider: llama.cpp")
+            print(f"Port: {args.port}")
+            print(f"GPU: {gpu_name}")
+        report = start_server(
+            target,
+            args.gpu,
+            model_path=args.model_path,
+            executable=args.llama_server,
+            host=args.host,
+            port=args.port,
+            wait_timeout=args.wait_timeout,
+        )
+        _print_runtime_report(report, args.json_output)
+        return 0 if report["state"] == "ready" else 1
+    raise ValueError("Model action must be one of: install, register, start, stop, status, list.")
 
 
 def main():
     args = parse_args()
+    if args.command == "model" or (args.command == "llama" and args.llama_action == "install"):
+        try:
+            return _handle_runtime_command(args)
+        except ValueError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 2
+        except (FileNotFoundError, FileExistsError, RuntimeError, urllib.error.URLError) as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 1
+    if args.command == "llama" and args.llama_action == "command":
+        try:
+            report = generate_llama_server_command(args.profile, args.gpu, args.model_path)
+        except ValueError as exc:
+            sys.stderr.write(f"{exc}\n")
+            return 2
+        print(to_json(report) if args.json_output else format_llama_server_command(report))
+        return 0
+    if args.command == "llama":
+        args.provider = "llamacpp"
+        args.command = args.llama_action or "doctor"
     explicit_model = args.model or args.frontend_model or args.frontend_model_alias or args.backend_model or args.backend_model_alias
-    if args.provider != "ollama" and not explicit_model:
+    if args.provider not in {"ollama", "llamacpp"} and not explicit_model:
         sys.stderr.write(
             f"--provider {args.provider} needs a model. Pass --model "
             "(e.g. --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct).\n"
@@ -813,19 +984,29 @@ def main():
     if args.command == "doctor":
         report = doctor_report(provider, frontend_model, backend_model, DEFAULT_NUM_CTX)
         print(to_json(report) if args.json_output else format_doctor(report))
-        return 0 if report["provider_available"] else 1
-    if args.command == "benchmark":
+        return 0 if report.get("readiness", "ready") == "ready" and report["provider_available"] else 1
+    if args.command in {"benchmark", "bench"}:
         if args.benchmark_runs < 1:
             sys.stderr.write("--benchmark-runs must be at least 1.\n")
             return 2
-        report = benchmark_model(provider, backend_model, args.benchmark_runs, DEFAULT_NUM_CTX)
+        if not provider.available():
+            message = provider.failure_message() if hasattr(provider, "failure_message") else f"Provider unavailable: {provider.describe()}"
+            sys.stderr.write(message + "\n")
+            return 1
+        try:
+            report = benchmark_model(provider, backend_model, args.benchmark_runs, DEFAULT_NUM_CTX, long_context=args.long_context)
+        except urllib.error.URLError as exc:
+            message = provider.failure_message() if hasattr(provider, "failure_message") else f"Connection error: {exc}"
+            sys.stderr.write(message + "\n")
+            return 1
         print(to_json(report) if args.json_output else format_benchmark(report))
         return 0
 
     preferred_frontend_model, preferred_backend_model = frontend_model, backend_model
     hardware = detect_hardware(ollama_base if provider.is_local else None)
     frontend_model, backend_model, routing_decision = resolve_model_routing(
-        args.model_routing, provider.is_local, hardware, frontend_model, backend_model, DEFAULT_NUM_CTX
+        args.model_routing, provider.is_local, hardware, frontend_model, backend_model, DEFAULT_NUM_CTX,
+        provider_is_heavy=getattr(provider, "is_heavy_backend", False),
     )
 
     agent = LocalPartner(
@@ -849,7 +1030,11 @@ def main():
     if not args.no_preflight:
         run_preflight(agent)
     if args.prompt:
-        reply = agent.run_turn(args.prompt)
+        try:
+            reply = agent.run_turn(args.prompt)
+        except urllib.error.URLError as exc:
+            sys.stderr.write(_connection_error_message(agent, exc) + "\n")
+            return 1
         agent.ui.print_markdown(reply)
         card = render_final_card(agent)
         if card:

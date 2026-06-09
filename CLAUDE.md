@@ -160,3 +160,16 @@ Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `de
 - Backend output is clipped to 12 000 chars (`ui.clip()`)
 - UI summaries truncate to 220 chars (`summarize_text()`)
 - Verbosity levels: `quiet` / `normal` / `debug` — debug shows raw JSON and tool output samples
+
+### llama.cpp external backend
+
+`LlamaCppProvider` subclasses `OpenAICompatibleProvider`; llama.cpp request code
+must not be duplicated and local-code must never parse/load GGUF itself or own
+quantization/offload/KV-cache behavior. `llamacpp.py` contains deployment
+profiles and argument generation. `llama_runtime.py` may discover/download a
+user-selected prebuilt executable, manage GGUF files, and explicitly start/stop
+an external process. It must never bundle or compile llama.cpp. Runtime state is
+kept under `LOCAL_CODE_HOME`/`~/.local-code`, downloads are atomic and optionally
+checksum-verified, and stop operations validate the recorded PID. Diagnostics
+probe `/v1/models`, `/v1/chat/completions`, and optional server metadata.
+Adaptive routing treats this provider as a pinned heavy phase.
