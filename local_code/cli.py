@@ -23,6 +23,8 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
+from .intelligence import DecisionService
+from .intelligence.indexer import format_index_report, index_repository
 from .paths import rist_home
 from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
 from .llama_runtime import (
@@ -74,11 +76,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Rist - local-first AI coding agent for real developer hardware."
     )
-    parser.add_argument("command", nargs="?", choices=["chat", "doctor", "benchmark", "bench", "llama", "model"], help="Run diagnostics, benchmark, or llama.cpp helpers")
+    parser.add_argument("command", nargs="?", choices=["chat", "doctor", "benchmark", "bench", "llama", "model", "index", "decisions"], help="Run diagnostics, benchmark, or llama.cpp helpers")
     parser.add_argument(
         "llama_action",
         nargs="?",
-        choices=["doctor", "command", "install", "start", "stop", "status", "list", "register", "logs", "remove"],
+        choices=["doctor", "command", "install", "start", "stop", "status", "list", "register", "logs", "remove", "add", "accept", "supersede", "review", "reject", "merge"],
         help="llama.cpp or managed-model action",
     )
     parser.add_argument("model_target", nargs="?", help="Managed model profile, e.g. qwen36")
@@ -96,6 +98,12 @@ def parse_args():
     parser.add_argument("--show-raw-actions", action="store_true", help="Show raw JSON actions/contracts in debug mode")
     parser.add_argument("--tool-calling", choices=["json", "native", "auto"], default=DEFAULT_TOOL_CALLING, help=f"Backend tool protocol ({DEFAULT_TOOL_CALLING})")
     parser.add_argument("--mode", choices=["chat", "hybrid", "agent"], default=DEFAULT_MODE, help=f"Interaction mode ({DEFAULT_MODE})")
+    parser.add_argument(
+        "--storage-mode",
+        choices=["local-only", "shared", "hybrid"],
+        default=None,
+        help="Repository memory policy (default: RIST_STORAGE_MODE or hybrid)",
+    )
     parser.add_argument("--model-routing", choices=["single", "adaptive", "dual"], default=DEFAULT_MODEL_ROUTING, help=f"Model residency/routing strategy ({DEFAULT_MODEL_ROUTING})")
     parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs per prompt size (3)")
     parser.add_argument("--long-context", action="store_true", help="Include an optional long-context benchmark prompt")
@@ -106,7 +114,20 @@ def parse_args():
     parser.add_argument("--sha256", default=None, help="Expected SHA-256 for a downloaded artifact")
     parser.add_argument("--filename", default=None, help="Destination filename for a downloaded GGUF")
     parser.add_argument("--destination", default=None, help="Destination path for a downloaded llama-server binary")
-    parser.add_argument("--force", action="store_true", help="Replace an artifact or stop a running model before removal")
+    parser.add_argument("--title", default=None, help="Decision title or edited candidate title")
+    parser.add_argument("--rationale", default="", help="Decision rationale")
+    parser.add_argument("--alternatives", action="append", default=[], help="Rejected alternative (repeatable)")
+    parser.add_argument("--consequences", action="append", default=[], help="Decision consequence (repeatable)")
+    parser.add_argument("--component", action="append", default=[], help="Affected component (repeatable)")
+    parser.add_argument("--source", action="append", default=[], help="Source reference (repeatable)")
+    parser.add_argument("--with", dest="superseding_id", default=None, help="Superseding decision ID")
+    parser.add_argument("--accept", dest="review_accept", default=None, help="Accept a pending candidate ID")
+    parser.add_argument("--reject", dest="review_reject", default=None, help="Reject a pending candidate ID")
+    parser.add_argument("--edit", dest="review_edit", default=None, help="Edit a pending candidate ID")
+    parser.add_argument("--merge", dest="review_merge", nargs="+", default=None, help="Merge pending candidate IDs")
+    parser.add_argument("--force", action="store_true", help="Force a full index rebuild, replace an artifact, or stop a running model before removal")
+    parser.add_argument("--status", action="store_true", help="Report repository index freshness without writing artifacts")
+    parser.add_argument("--preview", action="store_true", help="Preview repository index artifacts without writing them")
     parser.add_argument("--dry-run", action="store_true", help="Resolve and print model start details without launching a process")
     parser.add_argument("--delete-file", action="store_true", help="Delete a registered GGUF when removing a model")
     parser.add_argument("--yes", action="store_true", help="Confirm destructive model file deletion")
@@ -541,7 +562,7 @@ def interactive_loop(agent):
         try:
             prompt = read_prompt(session, pastes)
         except (EOFError, KeyboardInterrupt):
-            save_chat_history(agent.workdir, agent.history)
+            save_chat_history(agent.workdir, agent.history, agent.storage_mode)
             print()
             return 0
 
@@ -561,7 +582,7 @@ def interactive_loop(agent):
         if prompt == "/clear":
             agent.history.clear()
             agent.pending_plan = None
-            clear_chat_history(agent.workdir)
+            clear_chat_history(agent.workdir, agent.storage_mode)
             print("History cleared.")
             continue
         if prompt.startswith("/mode "):
@@ -817,6 +838,12 @@ def interactive_loop(agent):
             else:
                 print_reply(agent, reply)
             continue
+        if prompt == "/decisions" or prompt.startswith("/decisions "):
+            try:
+                print(agent.run_decision_command(prompt[1:]))
+            except (KeyError, ValueError) as exc:
+                print(f"Error: {exc}")
+            continue
         if prompt == "/status":
             print(render_status(agent))
             continue
@@ -1058,14 +1085,97 @@ def _invoked_as_legacy_command() -> bool:
     return Path(sys.argv[0]).stem == "local-code"
 
 
+def _decision_service(args):
+    from .memory import ensure_memory_files
+    paths = ensure_memory_files(args.workdir, args.storage_mode)
+    return DecisionService.load(paths["active_intelligence"])
+
+
+def _format_decisions(service, *, pending=False):
+    items = service.pending.values() if pending else service.decisions.values()
+    if not items:
+        return "No pending decision candidates." if pending else "No decisions."
+    lines = []
+    for item in sorted(items, key=lambda value: value.id):
+        status = "pending" if pending else item.status.value
+        lines.append(f"{item.id}  [{status}]  {item.title}")
+        if item.rationale:
+            lines.append(f"  {item.rationale}")
+    return "\n".join(lines)
+
+
+def _run_decisions(args):
+    service = _decision_service(args)
+    action = args.llama_action or "list"
+    target = args.model_target
+    if action == "list":
+        print(_format_decisions(service))
+    elif action == "add":
+        title = args.title or target
+        if not title:
+            raise SystemExit("rist decisions add requires a title")
+        decision = service.add(title=title, rationale=args.rationale, alternatives=args.alternatives, consequences=args.consequences,
+                               affected_components=args.component, source_references=args.source)
+        print(f"Added {decision.id} [proposed] {decision.title}")
+    elif action == "accept":
+        if not target:
+            raise SystemExit("rist decisions accept requires a decision ID")
+        decision = service.accept(target)
+        print(f"Accepted {decision.id}: {decision.title}")
+    elif action == "supersede":
+        if not target or not args.superseding_id:
+            raise SystemExit("rist decisions supersede OLD_ID --with NEW_ID")
+        old, new = service.supersede(target, args.superseding_id)
+        print(f"{old.id} superseded by {new.id}")
+    elif action == "reject":
+        decision = service.reject(target, args.rationale)
+        print(f"Rejected {decision.id}: {decision.title}")
+    elif action == "merge":
+        ids = ([target] if target else []) + (args.review_merge or [])
+        candidate = service.merge_candidates(ids, title=args.title)
+        print(f"Merged into pending candidate {candidate.id}: {candidate.title}")
+    elif action == "review":
+        if args.review_accept:
+            decision = service.accept(args.review_accept)
+            print(f"Accepted {decision.id}: {decision.title}")
+        elif args.review_reject:
+            decision = service.reject(args.review_reject, args.rationale)
+            print(f"Rejected {decision.id}: {decision.title}")
+        elif args.review_edit:
+            candidate = service.edit_candidate(args.review_edit, title=args.title, rationale=args.rationale or None,
+                                               alternatives=args.alternatives or None, consequences=args.consequences or None,
+                                               affected_components=args.component or None, source_references=args.source or None)
+            print(f"Updated pending candidate {candidate.id}: {candidate.title}")
+        elif args.review_merge:
+            candidate = service.merge_candidates(args.review_merge, title=args.title)
+            print(f"Merged into pending candidate {candidate.id}: {candidate.title}")
+        else:
+            print(_format_decisions(service, pending=True))
+    return 0
+
+
 def main():
     if _invoked_as_legacy_command():
         sys.stderr.write("local-code is deprecated and will be removed in a future release. Use `rist` instead.\n")
     rist_home()
     args = parse_args()
+    if args.command == "decisions":
+        return _run_decisions(args)
     if args.command == "chat":
         args.command = None
         args.mode = "chat"
+    if args.command == "index":
+        if args.status and (args.force or args.preview or args.dry_run):
+            sys.stderr.write("--status cannot be combined with --force, --preview, or --dry-run.\n")
+            return 2
+        report = index_repository(
+            args.workdir,
+            force=args.force,
+            preview=args.preview or args.dry_run,
+            status_only=args.status,
+        )
+        print(to_json(report) if args.json_output else format_index_report(report))
+        return 0
     if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs"}):
         try:
             return _handle_runtime_command(args)
@@ -1147,6 +1257,7 @@ def main():
         context_limit=DEFAULT_NUM_CTX,
         preferred_frontend_model=preferred_frontend_model,
         preferred_backend_model=preferred_backend_model,
+        storage_mode=args.storage_mode,
     )
     if not args.no_preflight:
         run_preflight(agent)

@@ -39,6 +39,7 @@ from .contracts import (
     resolve_repo_file_hints,
     unwrap_frontend_reply_text,
 )
+from .intelligence import DecisionService, IntelligenceStore, atomic_write_text, execute_decision_command
 from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
 from .permissions import command_is_blocked, confirm_action
 from .tool_specs import native_tool_definitions, tool_prompt_lines, validate_tool_call
@@ -272,7 +273,8 @@ class LocalCodeAgent:
                 "tests_run": ["..."],
                 "risks": ["..."],
                 "needs_approval": true_or_false,
-                "plan": ["concrete step 1", "concrete step 2"]
+                "plan": ["concrete step 1", "concrete step 2"],
+                "decision_candidates": [{{"title":"...","rationale":"...","alternatives":[],"consequences":[],"affected_components":[],"source_references":[]}}]
               }}
             - In plan mode: the "plan" array must contain one entry per concrete change, formatted as "Edit <filename>:<function_or_section> — <what changes and why>". The "diff_summary" field must contain a real unified diff (--- a/path, +++ b/path, @@ ... @@) showing the exact lines that would change. Read files before writing the diff.
             - In propose mode: populate diff_summary with a real unified diff showing exactly what lines would change. Read each file first, then produce --- / +++ / @@ hunks. Populate plan with one entry per file change.
@@ -345,7 +347,8 @@ class LocalCodeAgent:
                       "tests_run": ["..."],
                       "risks": ["..."],
                       "needs_approval": true_or_false,
-                      "plan": ["step 1", "step 2"]
+                      "plan": ["step 1", "step 2"],
+                      "decision_candidates": [{{"title":"...","rationale":"...","alternatives":[],"consequences":[],"affected_components":[],"source_references":[]}}]
                     }}
 
                     This is a direct analysis pass. Do not propose tool actions. Return JSON only.
@@ -1025,6 +1028,7 @@ class LocalPartner:
         context_limit=DEFAULT_NUM_CTX,
         preferred_frontend_model=None,
         preferred_backend_model=None,
+        storage_mode=None,
     ):
         self.frontend_model = frontend_model
         self.backend_model = backend_model
@@ -1043,6 +1047,7 @@ class LocalPartner:
         self.model_routing = model_routing
         self.routing_decision = routing_decision or {"mode": "single" if frontend_model == backend_model else "dual", "reason": "Models configured directly."}
         self.context_limit = context_limit
+        self.storage_mode = storage_mode
         self.active_context_extra = ""
         self.ui = UI()
         self.observer = observer
@@ -1057,8 +1062,9 @@ class LocalPartner:
         self.on_token = None
         self.last_streamed = False
         self.backend_runs = 0
-        ensure_memory_files(self.workdir)
-        self.history = load_chat_history(self.workdir)
+        decision_paths = ensure_memory_files(self.workdir, self.storage_mode)
+        self.decisions = DecisionService.load(decision_paths["active_intelligence"])
+        self.history = load_chat_history(self.workdir, self.storage_mode)
         self.executor = LocalCodeAgent(
             model=self.backend_model,
             provider=self.provider,
@@ -1073,12 +1079,15 @@ class LocalPartner:
             confirm_hook=confirm_hook,
         )
 
+    def run_decision_command(self, command):
+        return execute_decision_command(self.decisions, command)
+
     def context_usage(self, extra=None):
         """Estimate the active prompt budget by source for transparent local tuning."""
         tool_text = tool_prompt_lines(self.executor.allowed_tool_names({"edit_policy": "execute"}))
         return build_context_usage(
             history=self.history,
-            memory=load_repo_memory(self.workdir),
+            memory=load_repo_memory(self.workdir, self.storage_mode),
             repo=git_context(self.workdir),
             tools=tool_text,
             other=self.active_context_extra if extra is None else extra,
@@ -1088,7 +1097,7 @@ class LocalPartner:
     def _prune_history(self):
         if len(self.history) > MAX_HISTORY_MESSAGES:
             self.history = self.history[-MAX_HISTORY_MESSAGES:]
-        save_chat_history(self.workdir, self.history)
+        save_chat_history(self.workdir, self.history, self.storage_mode)
 
     def sync_executor(self):
         self.executor.model = self.backend_model
@@ -1183,7 +1192,7 @@ class LocalPartner:
             {git_context(self.workdir)}
 
             Repo memory:
-            {load_repo_memory(self.workdir)}
+            {load_repo_memory(self.workdir, self.storage_mode)}
 
             Current mode: {self.mode}
 
@@ -1374,6 +1383,8 @@ class LocalPartner:
             If the user supplied pasted output, address what that output indicates directly.
             Do not ask for the same output again unless the report says it is missing or truncated.
             Preserve uncertainty where the report is uncertain.
+            If requires_deviation_explanation is true, explicitly explain whether and why the work intentionally deviated from an accepted decision.
+            Mention any decision candidates as pending human review, never as established fact.
             Be concise but useful.
             Return plain text only.
             """
@@ -1423,7 +1434,7 @@ class LocalPartner:
             "backend_report": report,
             "result": result,
         }
-        append_run_log(self.workdir, entry)
+        append_run_log(self.workdir, entry, self.storage_mode)
 
     def _compact_string_list(self, value, limit=6):
         if not isinstance(value, list):
@@ -1599,26 +1610,42 @@ class LocalPartner:
 
     def _run_backend(self, contract):
         self.backend_runs += 1
+        contract = dict(contract)
+        contract.update(self.decisions.contract_context(contract.get("goal", "")))
         contract = self._contract_with_intent_scaffold(contract)
-        memory = load_repo_memory(self.workdir)
+        memory = load_repo_memory(self.workdir, self.storage_mode)
         if self.frontend_model != self.backend_model:
             decision = self._assess_complexity(contract)
             if decision == "escalate":
                 self.milestone(f"complex task → escalating to {self.backend_model}")
-                return self.executor.run_contract_with_model(contract, memory, self.backend_model)
+                report = self.executor.run_contract_with_model(contract, memory, self.backend_model)
             else:
                 self.milestone(f"simple task → handling with {self.frontend_model}")
                 try:
-                    return self.executor.run_contract_with_model(contract, memory, self.frontend_model)
+                    report = self.executor.run_contract_with_model(contract, memory, self.frontend_model)
                 except urllib.error.HTTPError as exc:
-                    if exc.code == 404:
-                        self.milestone(f"{self.frontend_model} not available, falling back to {self.backend_model}")
-                        return self.executor.run_contract_with_model(contract, memory, self.backend_model)
-                    raise
-        return self.executor.run_contract(contract, memory)
+                    if exc.code != 404:
+                        raise
+                    self.milestone(f"{self.frontend_model} not available, falling back to {self.backend_model}")
+                    report = self.executor.run_contract_with_model(contract, memory, self.backend_model)
+        else:
+            report = self.executor.run_contract(contract, memory)
+        report = dict(report)
+        report["decision_conflicts"] = contract.get("decision_conflicts", [])
+        report["requires_deviation_explanation"] = bool(contract.get("requires_deviation_explanation"))
+        candidates = self.decisions.extract_candidates(report, source_run=datetime.now().isoformat(timespec="seconds"))
+        candidate_conflicts = self.decisions.conflicts_for(contract.get("goal", ""), candidates)
+        report["decision_conflicts"] = list(report["decision_conflicts"]) + [conflict.to_dict() for conflict in candidate_conflicts]
+        report["requires_deviation_explanation"] = bool(report["decision_conflicts"])
+        report["pending_decision_candidates"] = [candidate.to_dict() for candidate in candidates]
+        if candidates:
+            self.milestone(f"{len(candidates)} decision candidate(s) pending review")
+        return report
 
     def update_memory(self):
-        paths = memory_paths(self.workdir)
+        paths = memory_paths(self.workdir, self.storage_mode)
+        if paths["mode"].value == "shared":
+            return
         current = paths["project"].read_text(encoding="utf-8", errors="replace").strip()
         recent = load_recent_runs(paths["runs"], limit=8)
         if not recent:
@@ -1630,7 +1657,8 @@ class LocalPartner:
                 f"Current project.md:\n{current}\n\n"
                 f"Recent runs:\n{recent}\n\n"
                 "Rules: only add new reusable facts (commands, key files, stack, patterns). "
-                "Keep each addition to one line. Do not remove existing entries. "
+                "Keep each addition to one bullet line under the existing sections. "
+                "Preserve rist metadata comments and headings. Do not remove existing entries. "
                 "Return ONLY the full updated file content, no explanation."
             ),
         }]
@@ -1638,7 +1666,8 @@ class LocalPartner:
             updated = self.provider.chat(self.backend_model, messages)
         updated = updated.strip()
         if updated and updated != current:
-            paths["project"].write_text(updated + "\n", encoding="utf-8")
+            atomic_write_text(paths["project"], updated + "\n")
+            IntelligenceStore.load(paths["active_intelligence"], sync_views=True)
             self.milestone("project memory updated")
 
     def apply_pending_plan(self):
@@ -1656,7 +1685,7 @@ class LocalPartner:
         self.pending_plan = None
         self.history.append({"role": "user", "content": "Apply the approved plan."})
         self.history.append({"role": "assistant", "content": reply})
-        save_chat_history(self.workdir, self.history)
+        save_chat_history(self.workdir, self.history, self.storage_mode)
         self.log_run("/apply", reply, contract=contract, report=report)
         return reply
 

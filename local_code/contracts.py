@@ -317,6 +317,9 @@ def normalize_backend_report(report, fallback_message=""):
         "risks": report.get("risks") or [],
         "needs_approval": bool(report.get("needs_approval", False)),
         "plan": report.get("plan") or [],
+        "decision_candidates": report.get("decision_candidates") or [],
+        "decision_conflicts": report.get("decision_conflicts") or [],
+        "requires_deviation_explanation": bool(report.get("requires_deviation_explanation", False)),
     }
 
 

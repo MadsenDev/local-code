@@ -344,3 +344,65 @@ Rist cannot discover logs for manually started servers. Large MoE models
 are heavy, experimental backends; on 8–12 GB GPUs, avoid frequent model
 switching and increase context or batch sizes only after measuring a stable
 baseline.
+
+## Structured repository intelligence
+
+Rist uses an explicit privacy boundary inside each repository:
+
+```text
+.rist/
+├── project/                 # reviewable, optionally committed team knowledge
+│   ├── intelligence.json
+│   ├── dependency-graph.json    # typed static-analysis and manifest graph
+│   ├── project.md
+│   ├── architecture.md          # concise generated graph view
+│   └── decisions.md
+├── local/                   # always ignored, machine/user-specific state
+│   ├── intelligence/
+│   ├── chat_history.jsonl
+│   ├── runs.jsonl
+│   └── preferences.json
+└── .gitignore               # precise scope rules; never a blanket `*`
+```
+
+Choose the policy with `--storage-mode local-only|shared|hybrid`, or set
+`RIST_STORAGE_MODE`. The default is `hybrid`:
+
+- **`local-only`** ignores both scopes and reads only local intelligence.
+- **`shared`** reads reviewable project intelligence and disables automatic
+  learning from raw run history.
+- **`hybrid`** reads both scopes, while automatically learned facts remain
+  local until a person rewrites/reviews them for `.rist/project/`.
+
+Only durable, reviewed project identity, accepted decisions, architecture
+components/relationships, conventions, and lifecycle classifications are
+eligible for the project scope. Proposed/rejected records and operational facts
+remain local. Project-scope writes are rejected if they contain likely secrets,
+prompt or provider details, environment values, sensitive fields, or absolute
+home-directory paths. Treat this as a safety net, not a substitute for review:
+inspect `.rist/project/` before staging it.
+
+The `rist index` command merges filesystem, package-manifest, and language-parser
+evidence into `dependency-graph.json`. Python extraction uses the standard
+library AST, while JavaScript and TypeScript use a replaceable parser adapter.
+Stable node and edge IDs make incremental indexing remove stale relationships;
+the generated `architecture.md` summarizes inferred layers and cites graph IDs.
+
+Chat transcripts, raw run logs, caches, local paths, provider configuration, and
+personal workflow preferences always belong under `.rist/local/` and are
+ignored. Never copy API keys, tokens, prompts, `.env` contents, or personal paths
+into reviewable records.
+
+On first use after an upgrade, Rist moves the old fully ignored root-level
+`.rist` intelligence and `.rist/private/` state into `.rist/local/`, replaces
+the blanket `.rist/.gitignore` rule with precise entries, and removes obsolete
+whole-`.rist` rules from `.git/info/exclude`. Migration never runs `git add`,
+never stages files, and never commits anything. Review and manually promote only
+the minimal knowledge your team intends to share. Existing `.local-code/`
+repository memory is copied first and then follows the same private migration.
+
+The versioned JSON store remains authoritative and the Markdown files are
+editable views. Rist imports supported bullet, status, and confidence edits and
+then renders the views back from structured records. Every record retains a
+stable ID, lifecycle status, confidence, source provenance, timestamps, and
+supersession links.
