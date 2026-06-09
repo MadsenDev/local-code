@@ -24,6 +24,9 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Button, Footer, Input, Label, RichLog, Static
 
+from .hardware import detect_hardware
+from .routing import resolve_model_routing
+
 
 class ConfirmScreen(ModalScreen[bool]):
     """Modal approval prompt used for edit/command confirmations."""
@@ -120,7 +123,7 @@ class LocalCodeApp(App):
         models = p.frontend_model if p.frontend_model == p.backend_model else f"{p.frontend_model} → {p.backend_model}"
         return (
             f"[b]{p.provider.name}[/b]  ·  {models}  ·  mode {p.mode}  ·  "
-            f"edits {p.edit_permission}/cmds {p.command_permission}"
+            f"routing {p.routing_decision.get('mode', p.model_routing)}  ·  edits {p.edit_permission}/cmds {p.command_permission}"
             + ("  ·  [yellow]proposal pending — type 'yes'[/]" if p.pending_plan else "")
         )
 
@@ -162,6 +165,29 @@ class LocalCodeApp(App):
         if cmd == "/models":
             self._write_models()
             return True
+        if cmd == "/context":
+            usage = self.partner.context_usage()
+            body = "\n".join([
+                f"Conversation: {usage.conversation:,}",
+                f"Memory: {usage.memory:,}",
+                f"Repo: {usage.repo:,}",
+                f"Tools: {usage.tools:,}",
+                f"Other: {usage.other:,}",
+                f"Total: {usage.total:,} / {usage.limit:,} ({usage.percent}%)",
+            ])
+            self.query_one("#log", RichLog).write(Panel(Text(body), title="context", border_style="cyan"))
+            return True
+        if cmd == "/routing" and arg in {"single", "adaptive", "dual"}:
+            p = self.partner
+            hardware = detect_hardware(getattr(p.provider, "base_url", None) if p.provider.is_local else None)
+            front, back, decision = resolve_model_routing(
+                arg, p.provider.is_local, hardware, p.preferred_frontend_model, p.preferred_backend_model, p.context_limit
+            )
+            p.model_routing, p.frontend_model, p.backend_model, p.routing_decision = arg, front, back, decision
+            p.sync_executor()
+            self.query_one("#log", RichLog).write(Text(f"Model routing: {decision['mode']} — {decision['reason']}", style="cyan"))
+            self._refresh_status()
+            return True
         if cmd == "/mode" and arg in {"chat", "hybrid", "agent"}:
             self.partner.mode = arg
             self._refresh_status()
@@ -169,8 +195,10 @@ class LocalCodeApp(App):
         if cmd in {"/model", "/frontend", "/backend"} and arg:
             if cmd in {"/model", "/frontend"}:
                 self.partner.frontend_model = arg
+                self.partner.preferred_frontend_model = arg
             if cmd in {"/model", "/backend"}:
                 self.partner.backend_model = arg
+                self.partner.preferred_backend_model = arg
             self._refresh_status()
             return True
         if cmd == "/apply":

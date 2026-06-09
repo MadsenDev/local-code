@@ -46,6 +46,17 @@ local-code --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
 # Run a single prompt non-interactively
 local-code --prompt "what does this repo do?"
 
+# Let Local-Code choose single vs dual residency from detected VRAM (default)
+local-code --model-routing adaptive
+local-code --model-routing single   # never switch model weights
+local-code --model-routing dual     # explicitly preserve separate role models
+
+# Inspect hardware, loaded models, and the routing recommendation
+local-code doctor
+
+# Measure model latency and generation throughput
+local-code benchmark --model qwen2.5-coder:7b --benchmark-runs 3
+
 # Set interaction mode
 local-code --mode chat      # conversational only
 local-code --mode hybrid    # auto-delegate code tasks (default)
@@ -64,6 +75,8 @@ local-code --tool-calling auto    # try native tools, then fall back to JSON
 | `chat` | Direct single-model replies, no tool loop |
 | `hybrid` | Auto-delegates code/repo tasks to the backend tool loop |
 | `agent` | All turns go to the backend tool loop |
+
+Model routing is separate from interaction mode. `adaptive` is the default and only keeps separate frontend/backend models when hardware estimates indicate that both can stay resident. `single` shares one model, while `dual` honors separate role models regardless of estimated reload cost.
 
 ## TUI
 
@@ -142,9 +155,17 @@ are retried with backoff, and the model is kept resident via `keep_alive`.
 /files         Pick a file with fzf
 /models        Show model tiers and the recommended-minimum standard
 /status        Show current config
+/context       Show estimated context usage by source
+/routing MODE  Switch single/adaptive/dual model routing
 /clear         Clear chat history
 /quit          Exit
 ```
+
+## Hardware diagnostics and context accounting
+
+`local-code doctor` reports system RAM, GPU/VRAM, currently loaded Ollama models, model availability, and a single/dual routing recommendation. `local-code benchmark` makes short measured calls and reports elapsed time plus TTFT and tokens/second when the provider exposes those counters. Add `--json` to either command for machine-readable output.
+
+The interactive `/context` command and `/status` expose an estimated context budget split across conversation history, persistent project memory, repository context, and tool definitions. The estimate intentionally uses a dependency-free conservative heuristic; provider-native token counts remain authoritative when available.
 
 ## Architecture
 
