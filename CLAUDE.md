@@ -16,7 +16,7 @@ pip install -e ".[dev]"
 .venv/bin/pytest tests/test_contracts.py::TestNormalizeBackendReport -v
 
 # Run the CLI
-local-code [--mode chat|hybrid|agent] [--workdir DIR] [--prompt TEXT]
+rist [--mode chat|hybrid|agent] [--workdir DIR] [--prompt TEXT]
 
 # Measure a model's tool-loop reliability (needs a live Ollama)
 python -m local_code.eval --model qwen2.5-coder:7b
@@ -122,9 +122,9 @@ When `edit_policy` is `plan` or `propose`, the backend produces a report without
 | `hybrid` | Frontend decides per-turn whether to delegate |
 | `agent` | All turns go directly to backend |
 
-### Memory (`.local-code/`)
+### Memory (`.rist/`)
 
-Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `decisions.md`, `architecture.md`, `runs.jsonl`. `load_repo_memory()` concatenates these and injects them into the backend system prompt. The directory is auto-created on first run.
+Per-repo memory lives in `.rist/` (git-excluded). Files: `project.md`, `decisions.md`, `architecture.md`, `runs.jsonl`. `load_repo_memory()` concatenates these and injects them into the backend system prompt. The directory is auto-created on first run.
 
 ### Tools available to the backend
 
@@ -164,12 +164,12 @@ Per-repo memory lives in `.local-code/` (git-excluded). Files: `project.md`, `de
 ### llama.cpp external backend
 
 `LlamaCppProvider` subclasses `OpenAICompatibleProvider`; llama.cpp request code
-must not be duplicated and local-code must never parse/load GGUF itself or own
+must not be duplicated and Rist must never parse/load GGUF itself or own
 quantization/offload/KV-cache behavior. `llamacpp.py` contains deployment
 profiles and argument generation. `llama_runtime.py` may discover/download a
 user-selected prebuilt executable, manage GGUF files, and explicitly start/stop
 an external process. It must never bundle or compile llama.cpp. Runtime state is
-kept under `LOCAL_CODE_HOME`/`~/.local-code`, downloads are atomic and optionally
+kept under `RIST_HOME`/`~/.rist` (`LOCAL_CODE_HOME` remains a compatibility override), downloads are atomic and optionally
 checksum-verified, and stop operations validate the recorded PID. Diagnostics
 probe `/v1/models`, `/v1/chat/completions`, and optional server metadata.
 Adaptive routing treats this provider as a pinned heavy phase.

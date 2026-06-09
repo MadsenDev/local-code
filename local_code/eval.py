@@ -1,7 +1,7 @@
 """Reliability eval harness for local models.
 
 Measures how dependably a model drives the backend tool loop — the thing that
-actually determines whether local-code "works great" on a given model. It runs
+actually determines whether Rist "works great" on a given model. It runs
 a battery of safe, read-only inspection tasks against a throwaway repo and
 scores each outcome.
 
@@ -143,7 +143,7 @@ def summarize(eval_result):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Measure a model's tool-loop reliability for local-code.")
+    parser = argparse.ArgumentParser(description="Measure a model's tool-loop reliability for Rist.")
     parser.add_argument("--model", default=None, help="Model used for both roles")
     parser.add_argument("--backend-model", dest="backend_model", default=None, help="Backend model (defaults to --model)")
     parser.add_argument("--frontend-model", dest="frontend_model", default=None, help="Frontend model (advisory only)")

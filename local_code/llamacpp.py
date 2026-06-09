@@ -1,6 +1,6 @@
 """llama.cpp orchestration helpers.
 
-local-code never implements inference or loads GGUF itself. This module contains
+Rist never implements inference or loads GGUF itself. This module contains
 documented profiles and argument generation for an external llama.cpp runtime.
 """
 
@@ -137,7 +137,7 @@ def format_llama_server_command(report):
     profile = report["profile"]
     lines = [
         f"# {profile['name']} ({profile['status']}, {profile['role']})",
-        "# This command helper does not execute it. `local-code model start` can start it explicitly.",
+        "# This command helper does not execute it. `rist model start` can start it explicitly.",
         report["command"],
         "",
         report["warning"],

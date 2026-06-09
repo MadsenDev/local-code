@@ -86,7 +86,7 @@ def test_llamacpp_doctor_reports_stale_and_unreachable(monkeypatch):
     output = format_doctor(doctor_report(Unreachable(), "wrong-model", "wrong-model"))
     assert "status: stale" in output
     assert "base URL reachable: no" in output
-    assert "local-code llama logs --tail 50" in output
+    assert "rist llama logs --tail 50" in output
     assert "stale PID/state detected" in output
 
 

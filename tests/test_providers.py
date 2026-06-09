@@ -57,10 +57,10 @@ class TestOpenAIPayload:
         assert result.tool_calls[0]["function"]["name"] == "read_file"
 
     def test_headers_include_auth_and_extra(self):
-        p = OpenAICompatibleProvider("https://x/v1", api_key="secret", name="openrouter", extra_headers={"X-Title": "local-code"})
+        p = OpenAICompatibleProvider("https://x/v1", api_key="secret", name="openrouter", extra_headers={"X-Title": "custom-client"})
         headers = p._headers()
         assert headers["Authorization"] == "Bearer secret"
-        assert headers["X-Title"] == "local-code"
+        assert headers["X-Title"] == "custom-client"
 
 
 class TestFormatFallback:
@@ -123,7 +123,7 @@ class TestBuildProvider:
         assert p.name == "openrouter"
         assert p.base_url == providers.OPENROUTER_BASE_URL
         assert p.api_key == "rk"
-        assert p._headers()["X-Title"] == "local-code"
+        assert p._headers()["X-Title"] == "Rist"
 
     def test_openai_uses_env_key(self, monkeypatch):
         monkeypatch.setenv("OPENAI_API_KEY", "ok")
@@ -168,7 +168,7 @@ def test_llamacpp_failure_message_is_actionable():
     p = build_provider("llamacpp", base_url="http://localhost:9000/v1")
     message = p.failure_message()
     assert "http://localhost:9000/v1" in message
-    assert "local-code llama command" in message
+    assert "rist llama command" in message
 
 
 def test_llamacpp_local_alias_accepts_reported_model_name(monkeypatch):

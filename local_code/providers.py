@@ -1,6 +1,6 @@
 """Model provider abstraction.
 
-`local-code` talks to models through a small provider interface so the same
+Rist talks to models through a small provider interface so the same
 agent/tool loop can run against a local Ollama server or any OpenAI-compatible
 HTTP API (OpenRouter, OpenAI, Together, Groq, a local vLLM/llama.cpp server,
 etc.). Two implementations ship here:
@@ -149,7 +149,7 @@ class OpenAICompatibleProvider(Provider):
 
     # -- HTTP plumbing --------------------------------------------------
     def _headers(self):
-        headers = {"Content-Type": "application/json", "User-Agent": "local-code/0.2"}
+        headers = {"Content-Type": "application/json", "User-Agent": "rist/0.2"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         headers.update(self.extra_headers)
@@ -346,8 +346,8 @@ class LlamaCppProvider(OpenAICompatibleProvider):
         return (
             f"llama.cpp provider is configured, but no server responded at {self.base_url}.\n\n"
             "Start llama-server first, or change the base_url in your config.\n"
-            "Run: local-code model start qwen36 --gpu rtx3060\n"
-            "Or print flags: local-code llama command --profile qwen36-35b-a3b --gpu rtx3060"
+            "Run: rist model start qwen36 --gpu rtx3060\n"
+            "Or print flags: rist llama command --profile qwen36-35b-a3b --gpu rtx3060"
         )
 
 
@@ -367,7 +367,7 @@ def build_provider(kind, *, base_url=None, api_key=None):
             base_url or OPENROUTER_BASE_URL,
             api_key=key,
             name="openrouter",
-            extra_headers={"X-Title": "local-code", "HTTP-Referer": "https://github.com/MadsenDev/local-code"},
+            extra_headers={"X-Title": "Rist", "HTTP-Referer": "https://github.com/MadsenDev/local-code"},
         )
     if kind in {"openai", "openai-compatible"}:
         key = api_key or os.environ.get("OPENAI_API_KEY")

@@ -6,6 +6,7 @@ import subprocess
 import sys
 import time
 import urllib.error
+from pathlib import Path
 
 from .agent import LocalPartner
 from .config import (
@@ -22,6 +23,7 @@ from .config import (
     MAX_TOOL_STEPS,
 )
 from .memory import clear_chat_history, save_chat_history
+from .paths import rist_home
 from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
 from .llama_runtime import (
     install_llama_server,
@@ -69,8 +71,10 @@ except Exception:
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Local-first coding agent with hardware-aware model routing.")
-    parser.add_argument("command", nargs="?", choices=["doctor", "benchmark", "bench", "llama", "model"], help="Run diagnostics, benchmark, or llama.cpp helpers")
+    parser = argparse.ArgumentParser(
+        description="Rist - local-first AI coding agent for real developer hardware."
+    )
+    parser.add_argument("command", nargs="?", choices=["chat", "doctor", "benchmark", "bench", "llama", "model"], help="Run diagnostics, benchmark, or llama.cpp helpers")
     parser.add_argument(
         "llama_action",
         nargs="?",
@@ -152,7 +156,7 @@ def run_preflight(agent, verbose=False):
             body = [
                 f"Provider: {agent.provider.describe()}",
                 "Reported models: " + (", ".join(models) or "none"),
-                "External heavy backend; run `local-code llama doctor` for a chat probe and server metadata.",
+                "External heavy backend; run `rist llama doctor` for a chat probe and server metadata.",
             ]
             print(ui.box("llama.cpp", body, color=UI.CYAN), file=sys.stderr)
         return
@@ -230,7 +234,7 @@ def render_status(agent):
         ("Pending plan", "yes" if agent.pending_plan else "no"),
         ("Context", f"{agent.context_usage().total:,} / {agent.context_limit:,} estimated tokens ({agent.context_usage().percent}%)"),
     ]
-    return agent.ui.kv_box("local-code status", rows, color=UI.CYAN)
+    return agent.ui.kv_box("Rist status", rows, color=UI.CYAN)
 
 
 def render_final_card(agent):
@@ -266,12 +270,12 @@ def is_ui_chrome(prompt):
         "╰─",
         "─",
         "== Session ==",
-        "== Local Code ==",
+        "== Rist ==",
         "== Action ==",
         "== Result ==",
         "== Done ==",
         "You > ",
-        "local-code ",
+        "rist ",
         "backend ",
         "frontend ",
         "⠋ ",
@@ -883,7 +887,7 @@ def _show_managed_logs(tail=100, follow=False):
     try:
         if not path.exists():
             print("No managed llama.cpp server log has been created yet.")
-            print("local-code only knows about logs for servers started with `local-code model start`.")
+            print("Rist only knows about logs for servers started with `rist model start`.")
             return 0
         lines = recent_log_lines(tail, path)
         for line in lines:
@@ -904,7 +908,7 @@ def _show_managed_logs(tail=100, follow=False):
         return 0
     except OSError as exc:
         print(f"Unable to read the managed llama.cpp server log at {path}: {exc}")
-        print("If llama-server was started manually, local-code does not know where its logs are stored.")
+        print("If llama-server was started manually, Rist does not know where its logs are stored.")
         return 0
 
 
@@ -928,7 +932,7 @@ def _handle_runtime_command(args):
     action = args.llama_action
     if args.command == "llama" and action == "install":
         if not args.url:
-            raise ValueError("`local-code llama install` requires --url for a prebuilt llama-server binary.")
+            raise ValueError("`rist llama install` requires --url for a prebuilt llama-server binary.")
         report = install_llama_server(args.url, destination=args.destination, sha256=args.sha256, force=args.force)
         if args.json_output:
             print(to_json(report))
@@ -945,7 +949,7 @@ def _handle_runtime_command(args):
         if args.json_output:
             print(to_json(models))
         elif not models:
-            print("No managed llama.cpp models. Run: local-code model install qwen36 --url URL")
+            print("No managed llama.cpp models. Run: rist model install qwen36 --url URL")
         else:
             for model in models:
                 state = "installed" if model["exists"] else "missing"
@@ -959,7 +963,7 @@ def _handle_runtime_command(args):
         return 0
     target = args.model_target
     if not target:
-        raise ValueError(f"`local-code model {action or 'ACTION'}` requires a profile, e.g. qwen36.")
+        raise ValueError(f"`rist model {action or 'ACTION'}` requires a profile, e.g. qwen36.")
     if action == "install":
         if not args.url:
             raise ValueError("Model installation requires an explicit --url to a GGUF file; Hugging Face authentication is not managed yet.")
@@ -1050,8 +1054,18 @@ def _handle_runtime_command(args):
     raise ValueError("Model action must be one of: install, register, start, stop, status, list, remove.")
 
 
+def _invoked_as_legacy_command() -> bool:
+    return Path(sys.argv[0]).stem == "local-code"
+
+
 def main():
+    if _invoked_as_legacy_command():
+        sys.stderr.write("local-code is deprecated and will be removed in a future release. Use `rist` instead.\n")
+    rist_home()
     args = parse_args()
+    if args.command == "chat":
+        args.command = None
+        args.mode = "chat"
     if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs"}):
         try:
             return _handle_runtime_command(args)

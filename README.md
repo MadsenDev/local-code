@@ -1,4 +1,8 @@
-# local-code
+# Rist
+
+Rist is a local-first AI coding agent for real developer hardware.
+
+The old `local-code` command remains available as a temporary compatibility alias.
 
 A local-first AI coding CLI with a full-screen TUI. Uses a two-model
 architecture — a frontend model for conversation/routing and a backend model
@@ -24,48 +28,57 @@ ollama pull qwen2.5-coder:7b
 The full-screen TUI is the default interactive experience; if `textual` isn't
 installed or stdout isn't a TTY, it falls back to the plain line-based REPL.
 
+### Configuration and migration
+
+Rist stores user configuration and managed runtime data in `~/.rist/`, including
+`~/.rist/models.json` and `~/.rist/runtimes/`. On first use, if
+`~/.local-code/` exists and `~/.rist/` does not, Rist safely copies the legacy
+directory and leaves the original untouched. If both directories exist, Rist
+uses `~/.rist/` without overwriting it. Set `RIST_HOME` to use a custom location;
+`LOCAL_CODE_HOME` remains supported as a compatibility override.
+
 ## Usage
 
 ```bash
 # Default: full-screen TUI, qwen2.5-coder:7b for both roles (recommended on a 12 GB GPU)
-local-code
+rist
 
 # Plain line-based REPL instead of the TUI
-local-code --no-tui
+rist --no-tui
 
 # Override the model for both roles
-local-code --model qwen2.5-coder:14b
+rist --model qwen2.5-coder:14b
 
 # Use different models for frontend and backend (both must fit in VRAM)
-local-code --frontend-model qwen3:4b --backend-model qwen2.5-coder:7b
+rist --frontend-model qwen3:4b --backend-model qwen2.5-coder:7b
 
 # Use OpenRouter (any OpenAI-compatible provider works the same way)
 export OPENROUTER_API_KEY=sk-or-...
-local-code --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
+rist --provider openrouter --model qwen/qwen-2.5-coder-32b-instruct
 
 # Run a single prompt non-interactively
-local-code --prompt "what does this repo do?"
+rist --prompt "what does this repo do?"
 
-# Let Local-Code choose single vs dual residency from detected VRAM (default)
-local-code --model-routing adaptive
-local-code --model-routing single   # never switch model weights
-local-code --model-routing dual     # explicitly preserve separate role models
+# Let Rist choose single vs dual residency from detected VRAM (default)
+rist --model-routing adaptive
+rist --model-routing single   # never switch model weights
+rist --model-routing dual     # explicitly preserve separate role models
 
 # Inspect hardware, loaded models, and the routing recommendation
-local-code doctor
+rist doctor
 
 # Measure model latency and generation throughput
-local-code benchmark --model qwen2.5-coder:7b --benchmark-runs 3
+rist benchmark --model qwen2.5-coder:7b --benchmark-runs 3
 
 # Set interaction mode
-local-code --mode chat      # conversational only
-local-code --mode hybrid    # auto-delegate code tasks (default)
-local-code --mode agent     # always delegate to backend
+rist --mode chat      # conversational only
+rist --mode hybrid    # auto-delegate code tasks (default)
+rist --mode agent     # always delegate to backend
 
 # Choose backend tool protocol
-local-code --tool-calling json    # prompt-emitted JSON protocol (default)
-local-code --tool-calling native  # require Ollama native tool calls
-local-code --tool-calling auto    # try native tools, then fall back to JSON
+rist --tool-calling json    # prompt-emitted JSON protocol (default)
+rist --tool-calling native  # require Ollama native tool calls
+rist --tool-calling auto    # try native tools, then fall back to JSON
 ```
 
 ## Modes
@@ -80,9 +93,9 @@ Model routing is separate from interaction mode. `adaptive` is the default and o
 
 ## TUI
 
-`local-code` opens a full-screen Textual interface by default:
+Rist opens a full-screen Textual interface by default:
 
-- A scrolling transcript with rendered Markdown replies and `you` / `local-code` panels.
+- A scrolling transcript with rendered Markdown replies and `you` / `Rist` panels.
 - **Live token streaming** of the answer as it's generated.
 - **Tool-activity cards** — every repo read, search, command, and edit (with +/− counts) shows up as it happens.
 - **Approval modals** — in execute mode, edits and commands pop a y/n confirmation.
@@ -110,11 +123,11 @@ skip the local VRAM tiering and few-shot scaffolding (they don't need it).
 
 ## llama.cpp external backend
 
-> **local-code does not replace llama.cpp. local-code manages and connects to llama.cpp.**
+> **Rist does not replace llama.cpp. Rist manages and connects to llama.cpp.**
 
 llama.cpp owns all inference responsibilities: GGUF loading, quantization,
 GPU/CPU offloading, KV cache management, continuous batching, and model
-execution. local-code does not link against llama.cpp, parse GGUF files, compile
+execution. Rist does not link against llama.cpp, parse GGUF files, compile
 llama.cpp, or implement any inference behavior. It can, after an explicit user
 command, discover or download a prebuilt `llama-server`, register or download a
 GGUF, start and stop the external process, monitor health, and connect through
@@ -126,11 +139,11 @@ Install llama.cpp separately by following the upstream project, point
 binary selected by you:
 
 ```bash
-local-code llama install --url https://example.invalid/llama-server \
+rist llama install --url https://example.invalid/llama-server \
   --sha256 EXPECTED_SHA256
 ```
 
-local-code does not select releases, compile source, unpack platform archives,
+Rist does not select releases, compile source, unpack platform archives,
 or bypass operating-system trust controls. `llama install` expects a direct URL
 to a prebuilt executable; verify its origin and checksum.
 
@@ -140,19 +153,19 @@ renamed after success. Hugging Face authentication is not managed yet.
 
 ```bash
 # Keep an existing GGUF where it is.
-local-code model register qwen36 --model-path /models/qwen36.gguf
+rist model register qwen36 --model-path /models/qwen36.gguf
 
-# Or download a user-selected GGUF into ~/.local-code/models/llamacpp/.
-local-code model install qwen36 --url https://example.invalid/model.gguf \
+# Or download a user-selected GGUF into ~/.rist/models/llamacpp/.
+rist model install qwen36 --url https://example.invalid/model.gguf \
   --sha256 EXPECTED_SHA256
 
-local-code model list
+rist model list
 ```
 
 To print a conservative RTX 3060 12 GB-class starting command without executing it:
 
 ```bash
-local-code llama command --profile qwen36-35b-a3b --gpu rtx3060 \
+rist llama command --profile qwen36-35b-a3b --gpu rtx3060 \
   --model-path /path/to/model.gguf
 ```
 
@@ -176,23 +189,23 @@ llama-server \
 Start and manage the external server:
 
 ```bash
-# Finds llama-server via --llama-server, LLAMA_SERVER, PATH, or local-code's runtime directory.
+# Finds llama-server via --llama-server, LLAMA_SERVER, PATH, or rist's runtime directory.
 # Resolves the registered model, starts a detached process, records its PID/log,
 # and waits for /v1/models to become healthy.
-local-code model start qwen36 --gpu rtx3060
+rist model start qwen36 --gpu rtx3060
 
-local-code model status
-local-code model stop
+rist model status
+rist model stop
 
 # First verify /v1/models and a tiny /v1/chat/completions request.
-local-code llama doctor
+rist llama doctor
 
 # Run small/medium latency, TTFT, and throughput tests.
-local-code bench --provider llamacpp --model local --benchmark-runs 3
-local-code bench --provider llamacpp --model local --long-context
+rist bench --provider llamacpp --model local --benchmark-runs 3
+rist bench --provider llamacpp --model local --long-context
 
-# Use the external server for normal local-code work.
-local-code --provider llamacpp \
+# Use the external server for normal rist work.
+rist --provider llamacpp \
   --base-url http://127.0.0.1:8080/v1 \
   --model local \
   --model-routing adaptive
@@ -213,8 +226,8 @@ reloading a large model can be slow. Qwen3.6-35B-A3B and Qwen3-Coder-style GGUF
 profiles are therefore **experimental heavy backends**, especially on 12 GB
 GPUs—not defaults for quick chat or rapid tool loops.
 
-Managed runtime state lives under `~/.local-code/runtimes/llamacpp/` (or
-`LOCAL_CODE_HOME`), including `server.json` and `server.log`. local-code only
+Managed runtime state lives under `~/.rist/runtimes/llamacpp/` (or a custom
+`RIST_HOME`; the legacy `LOCAL_CODE_HOME` override is also accepted), including `server.json` and `server.log`. Rist only
 stops the PID it recorded, verifies that it still appears to be `llama-server`,
 and refuses to signal a reused/unrelated PID. An already occupied port is never
 silently taken over. `model start` is explicit; normal chat commands do not
@@ -232,8 +245,8 @@ sweet spot for a 12 GB GPU (full 16k context, fast, reliable tool calls).
 `qwen2.5-coder:14b` is the highest-quality model a 12 GB card can host.
 
 ```bash
-local-code --model qwen2.5-coder:7b   # recommended, single shared model
-local-code --model qwen2.5-coder:14b  # best quality on a 12 GB card
+rist --model qwen2.5-coder:7b   # recommended, single shared model
+rist --model qwen2.5-coder:14b  # best quality on a 12 GB card
 ```
 
 Lighter (best-effort — fine for chat/inspection, flaky on multi-file edits):
@@ -244,7 +257,7 @@ Splitting roles only helps if **both models fit in VRAM together** (otherwise
 every role switch reloads weights). On a 12 GB card:
 - `--frontend-model qwen3:4b --backend-model qwen2.5-coder:7b` — both stay resident
 
-`local-code` checks your models at startup and warns about anything below the
+Rist checks your models at startup and warns about anything below the
 standard, not pulled, or too large for the card. Run `/models` any time to see
 tiers, or `python -m local_code.eval --model NAME` to measure a model's
 tool-loop reliability. **See [MODELS.md](MODELS.md) for the full standard,
@@ -280,13 +293,13 @@ are retried with backoff, and the model is kept resident via `keep_alive`.
 
 ## Hardware diagnostics and context accounting
 
-`local-code doctor` reports system RAM, GPU/VRAM, currently loaded Ollama models, model availability, and a single/dual routing recommendation. `local-code benchmark` makes short measured calls and reports elapsed time plus TTFT and tokens/second when the provider exposes those counters. Add `--json` to either command for machine-readable output.
+`rist doctor` reports system RAM, GPU/VRAM, currently loaded Ollama models, model availability, and a single/dual routing recommendation. `rist benchmark` makes short measured calls and reports elapsed time plus TTFT and tokens/second when the provider exposes those counters. Add `--json` to either command for machine-readable output.
 
 The interactive `/context` command and `/status` expose an estimated context budget split across conversation history, persistent project memory, repository context, and tool definitions. The estimate intentionally uses a dependency-free conservative heuristic; provider-native token counts remain authoritative when available.
 
 ## Architecture
 
-Before delegated repo work starts, `local-code` now runs a compact intent-analysis pass. This asks the model to restate the user's goal, name non-goals, identify context to inspect before editing, and define success criteria. The resulting `intent_analysis` is attached to the backend contract so even smaller local models get a narrower first step before planning or patching.
+Before delegated repo work starts, Rist now runs a compact intent-analysis pass. This asks the model to restate the user's goal, name non-goals, identify context to inspect before editing, and define success criteria. The resulting `intent_analysis` is attached to the backend contract so even smaller local models get a narrower first step before planning or patching.
 
 Backend tools are defined once in a canonical registry and rendered into both the legacy JSON prompt protocol and Ollama/OpenAI-style function schemas. The default remains `--tool-calling json` for broad local-model compatibility; `native` requires structured tool calls, and `auto` tries native tool calls before falling back to JSON. Tool calls are validated against the registry before dispatch in all modes.
 
@@ -295,26 +308,26 @@ See [CLAUDE.md](CLAUDE.md) for full architecture notes.
 ## Managed llama.cpp workflow
 
 llama.cpp remains an **external inference runtime**: it loads GGUF files and
-owns quantization, KV cache, batching, and CPU/GPU offload. local-code only
+owns quantization, KV cache, batching, and CPU/GPU offload. Rist only
 provides a registry, lifecycle convenience commands, diagnostics, routing, and
 benchmarks. llama.cpp must be installed separately, or installed from a
 user-selected prebuilt binary URL with the helper.
 
 ```bash
-local-code llama install --url https://example.invalid/llama-server
-local-code model register qwen36 --path ~/Models/qwen.gguf --provider llamacpp
-local-code model start qwen36
-local-code llama doctor
-local-code bench --provider llamacpp --model local
-local-code llama logs
-local-code model stop qwen36
+rist llama install --url https://example.invalid/llama-server
+rist model register qwen36 --path ~/Models/qwen.gguf --provider llamacpp
+rist model start qwen36
+rist llama doctor
+rist bench --provider llamacpp --model local
+rist llama logs
+rist model stop qwen36
 ```
 
-Use `local-code model start qwen36 --dry-run` to inspect the executable, model,
+Use `rist model start qwen36 --dry-run` to inspect the executable, model,
 port, generated arguments, log, and state paths without launching anything.
-Use `local-code llama logs --tail 50` or `local-code llama logs --follow` for a
+Use `rist llama logs --tail 50` or `rist llama logs --follow` for a
 managed server. Logs and state are under
-`~/.local-code/runtimes/llamacpp/`. `local-code model remove qwen36`
+`~/.rist/runtimes/llamacpp/`. `rist model remove qwen36`
 unregisters a model but keeps its GGUF; add `--delete-file` (and optionally
 `--yes`) only when the file should also be deleted.
 
@@ -324,10 +337,10 @@ your local wrapper/configuration):
 
 ```bash
 llama-server -m ~/Models/qwen.gguf --host 127.0.0.1 --port 8080 ...
-local-code --provider llamacpp --base-url http://127.0.0.1:8080/v1 --model local
+rist --provider llamacpp --base-url http://127.0.0.1:8080/v1 --model local
 ```
 
-local-code cannot discover logs for manually started servers. Large MoE models
+Rist cannot discover logs for manually started servers. Large MoE models
 are heavy, experimental backends; on 8–12 GB GPUs, avoid frequent model
 switching and increase context or batch sizes only after measuring a stable
 baseline.
