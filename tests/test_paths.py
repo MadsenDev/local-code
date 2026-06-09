@@ -72,7 +72,10 @@ def test_project_memory_migrates_to_rist_without_deleting_legacy(tmp_path):
     legacy.mkdir()
     (legacy / "project.md").write_text("legacy notes\n", encoding="utf-8")
 
-    migrated = memory_paths(tmp_path)
+    from local_code.memory import ensure_memory_files
+
+    migrated = ensure_memory_files(tmp_path)
     assert migrated["base"] == tmp_path / ".rist"
-    assert migrated["project"].read_text(encoding="utf-8") == "legacy notes\n"
+    assert migrated["project"].read_text(encoding="utf-8").startswith("# Project Intelligence")
+    assert "legacy notes" in migrated["project"].read_text(encoding="utf-8")
     assert legacy.is_dir()
