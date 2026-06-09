@@ -150,3 +150,29 @@ class TestBuildProvider:
     def test_unavailable_without_key(self):
         p = OpenAICompatibleProvider("https://x/v1", api_key=None)
         assert p.available() is False
+
+
+def test_llamacpp_reuses_openai_transport_without_api_key(monkeypatch):
+    p = build_provider("llamacpp")
+    assert isinstance(p, providers.LlamaCppProvider)
+    assert isinstance(p, OpenAICompatibleProvider)
+    assert p.is_local is True
+    assert p.is_heavy_backend is True
+    assert p.base_url == "http://127.0.0.1:8080/v1"
+
+    monkeypatch.setattr(p, "_get_json", lambda path, timeout=10: {"data": [{"id": "local"}]})
+    assert p.available() is True
+
+
+def test_llamacpp_failure_message_is_actionable():
+    p = build_provider("llamacpp", base_url="http://localhost:9000/v1")
+    message = p.failure_message()
+    assert "http://localhost:9000/v1" in message
+    assert "local-code llama command" in message
+
+
+def test_llamacpp_local_alias_accepts_reported_model_name(monkeypatch):
+    p = build_provider("llamacpp")
+    monkeypatch.setattr(p, "list_models", lambda: {"/models/qwen.gguf"})
+    assert p.model_available("local") is True
+    assert p.model_available("different") is False

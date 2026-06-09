@@ -240,3 +240,14 @@ def advisory_lines(frontend_model: str, backend_model: str) -> list[str]:
 RECOMMENDED_STANDARD = "qwen2.5-coder:7b"
 RECOMMENDED_CEILING = "qwen2.5-coder:14b"
 BEST_EFFORT_FLOOR = "qwen3:4b"
+
+
+def provider_model_profile(profile_id: str):
+    """Return a first-class provider deployment profile by id.
+
+    Unlike ``classify_model``, these profiles describe orchestration and
+    hardware expectations rather than an inference implementation.
+    """
+    from .llamacpp import get_llamacpp_profile
+
+    return get_llamacpp_profile(profile_id)

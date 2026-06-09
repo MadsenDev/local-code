@@ -30,3 +30,30 @@ def test_benchmark_reports_elapsed_and_fallback_throughput():
     assert report["summary"]["median_elapsed_s"] >= 0
     assert report["summary"]["median_tokens_per_second"] is not None
     assert "Benchmark: model" in format_benchmark(report)
+
+
+class FakeLlamaProvider(FakeProvider):
+    name = "llamacpp"
+    is_local = True
+    base_url = "http://127.0.0.1:8080/v1"
+
+    def list_models(self):
+        return {"local"}
+
+    def server_metadata(self):
+        return {"health": {"status": "ok"}}
+
+
+def test_llamacpp_doctor_checks_models_chat_and_metadata():
+    report = doctor_report(FakeLlamaProvider(), "local", "local")
+    assert report["readiness"] == "ready"
+    assert report["models_endpoint"] is True
+    assert report["chat_completions"] is True
+    assert report["reported_models"] == ["local"]
+    assert "health" in report["server_metadata"]
+
+
+def test_benchmark_includes_small_and_medium_latency():
+    report = benchmark_model(FakeProvider(), "model", runs=1, long_context=True)
+    assert set(report["cases"]) == {"small", "medium", "long_context"}
+    assert set(report["suitability"]) == {"normal_chat", "coding_edits", "repo_analysis", "heavy_reasoning"}

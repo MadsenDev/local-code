@@ -73,3 +73,13 @@ class TestAdvisory:
     def test_no_dual_warning_for_shared_small_model(self):
         lines = advisory_lines("qwen2.5-coder:7b", "qwen2.5-coder:7b")
         assert all("won't stay resident" not in line for line in lines)
+
+
+def test_llamacpp_heavy_profile_defaults_to_single_routing():
+    from local_code.model_profiles import provider_model_profile
+
+    profile = provider_model_profile("qwen36-35b-a3b")
+    assert profile["provider"] == "llamacpp"
+    assert profile["role"] == "heavy_backend"
+    assert profile["recommended_routing"] == "single"
+    assert profile["status"] == "experimental"

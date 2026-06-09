@@ -3,13 +3,13 @@
 A local-first AI coding CLI with a full-screen TUI. Uses a two-model
 architecture — a frontend model for conversation/routing and a backend model
 for repo inspection and edits — though both roles default to the same model. It
-runs against a local [Ollama](https://ollama.com) server or any
-OpenAI-compatible provider (OpenRouter, OpenAI, …).
+runs against a local [Ollama](https://ollama.com) server, an external
+[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`, or a cloud OpenAI-compatible provider.
 
 ## Requirements
 
 - Python 3.11+
-- A model provider: [Ollama](https://ollama.com) running locally, **or** an OpenRouter/OpenAI API key
+- A model provider: [Ollama](https://ollama.com), an external llama.cpp `llama-server`, **or** an OpenRouter/OpenAI API key
 - `rg` (ripgrep) for file search
 - Optional: `delta` for colored diffs, `fzf` for file picker
 
@@ -100,13 +100,130 @@ Models are reached through a provider abstraction, selected with `--provider`:
 | Provider | Selection | Key |
 |----------|-----------|-----|
 | Ollama (local, default) | `--provider ollama` (default) | none |
+| llama.cpp (external, local) | `--provider llamacpp --model local` | none |
 | OpenRouter | `--provider openrouter --model VENDOR/MODEL` | `OPENROUTER_API_KEY` or `--api-key` |
 | OpenAI / OpenAI-compatible | `--provider openai [--base-url URL] --model MODEL` | `OPENAI_API_KEY` or `--api-key` |
 
-Any OpenAI-compatible endpoint (Together, Groq, a local vLLM/llama.cpp server,
-…) works via `--provider openai --base-url <url>`. The same structured-output
+Generic OpenAI-compatible endpoints (Together, Groq, local vLLM, …) work via `--provider openai --base-url <url>`. llama.cpp has a first-class `llamacpp` profile with local health checks, benchmarking, command generation, and heavy-backend routing. The same structured-output
 enforcement, retries, and tool loop apply across all providers. Cloud models
 skip the local VRAM tiering and few-shot scaffolding (they don't need it).
+
+## llama.cpp external backend
+
+> **local-code does not replace llama.cpp. local-code manages and connects to llama.cpp.**
+
+llama.cpp owns all inference responsibilities: GGUF loading, quantization,
+GPU/CPU offloading, KV cache management, continuous batching, and model
+execution. local-code does not link against llama.cpp, parse GGUF files, compile
+llama.cpp, or implement any inference behavior. It can, after an explicit user
+command, discover or download a prebuilt `llama-server`, register or download a
+GGUF, start and stop the external process, monitor health, and connect through
+the OpenAI-compatible HTTP API. Ollama remains supported and is still the
+default.
+
+Install llama.cpp separately by following the upstream project, point
+`LLAMA_SERVER` at an existing executable, or explicitly download a prebuilt
+binary selected by you:
+
+```bash
+local-code llama install --url https://example.invalid/llama-server \
+  --sha256 EXPECTED_SHA256
+```
+
+local-code does not select releases, compile source, unpack platform archives,
+or bypass operating-system trust controls. `llama install` expects a direct URL
+to a prebuilt executable; verify its origin and checksum.
+
+A GGUF can be registered in place or downloaded from an explicit URL. Downloads
+use a temporary `.part` file, support SHA-256 verification, and are atomically
+renamed after success. Hugging Face authentication is not managed yet.
+
+```bash
+# Keep an existing GGUF where it is.
+local-code model register qwen36 --model-path /models/qwen36.gguf
+
+# Or download a user-selected GGUF into ~/.local-code/models/llamacpp/.
+local-code model install qwen36 --url https://example.invalid/model.gguf \
+  --sha256 EXPECTED_SHA256
+
+local-code model list
+```
+
+To print a conservative RTX 3060 12 GB-class starting command without executing it:
+
+```bash
+local-code llama command --profile qwen36-35b-a3b --gpu rtx3060 \
+  --model-path /path/to/model.gguf
+```
+
+The generated command starts from:
+
+```bash
+llama-server \
+  -m /path/to/model.gguf \
+  -c 16384 \
+  -ngl 999 \
+  --n-cpu-moe 30 \
+  -fa on \
+  -t 8 \
+  -b 1024 \
+  -ub 1024 \
+  --jinja \
+  --host 127.0.0.1 \
+  --port 8080
+```
+
+Start and manage the external server:
+
+```bash
+# Finds llama-server via --llama-server, LLAMA_SERVER, PATH, or local-code's runtime directory.
+# Resolves the registered model, starts a detached process, records its PID/log,
+# and waits for /v1/models to become healthy.
+local-code model start qwen36 --gpu rtx3060
+
+local-code model status
+local-code model stop
+
+# First verify /v1/models and a tiny /v1/chat/completions request.
+local-code llama doctor
+
+# Run small/medium latency, TTFT, and throughput tests.
+local-code bench --provider llamacpp --model local --benchmark-runs 3
+local-code bench --provider llamacpp --model local --long-context
+
+# Use the external server for normal local-code work.
+local-code --provider llamacpp \
+  --base-url http://127.0.0.1:8080/v1 \
+  --model local \
+  --model-routing adaptive
+```
+
+`adaptive` treats llama.cpp profiles as heavy backends: once selected, the
+backend handles the whole heavy phase instead of repeatedly switching
+small → big → small → big. Large MoE profiles default conceptually to `single`
+/`heavy_backend` use. A separate small model may route before the heavy phase
+or summarize afterward, but rapid ping-pong is discouraged.
+
+The RTX 3060 command is a starting point, not a promise that every quant or
+context fits. After measuring a stable baseline, change one dimension at a
+time: context `16384 → 32768 → 65536`, threads `8 → 12 → 16`, batch
+`1024 → 2048`, or `n-cpu-moe` `24 → 30 → 32`. Larger contexts consume more RAM
+and KV cache; CPU-offloaded MoE weights can require substantial system RAM;
+reloading a large model can be slow. Qwen3.6-35B-A3B and Qwen3-Coder-style GGUF
+profiles are therefore **experimental heavy backends**, especially on 12 GB
+GPUs—not defaults for quick chat or rapid tool loops.
+
+Managed runtime state lives under `~/.local-code/runtimes/llamacpp/` (or
+`LOCAL_CODE_HOME`), including `server.json` and `server.log`. local-code only
+stops the PID it recorded, verifies that it still appears to be `llama-server`,
+and refuses to signal a reused/unrelated PID. An already occupied port is never
+silently taken over. `model start` is explicit; normal chat commands do not
+implicitly launch or download anything.
+
+If the server is absent, diagnostics and preflight print the configured URL and
+lifecycle guidance instead of an Ollama-specific connection error. Optional
+llama.cpp `/health`, `/props`, `/slots`, and `/metrics` data is included when the
+server build exposes it (metrics may need server-side enablement).
 
 ## Models
 

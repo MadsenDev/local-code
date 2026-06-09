@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "local-code"
 version = "0.1.0"
-description = "Local AI coding partner backed by Ollama"
+description = "Local AI coding partner for Ollama and external OpenAI-compatible servers"
 requires-python = ">=3.11"
 dependencies = []
 

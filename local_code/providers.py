@@ -31,6 +31,7 @@ from .config import (
     PROSE_TEMPERATURE,
     STRUCTURED_TEMPERATURE,
 )
+from .llamacpp import DEFAULT_LLAMACPP_BASE_URL
 from .models import (
     OllamaChatResult,
     _is_transient,
@@ -279,14 +280,87 @@ class OpenAICompatibleProvider(Provider):
         return f"{self.name} @ {self.base_url} ({key})"
 
 
+
+class LlamaCppProvider(OpenAICompatibleProvider):
+    """Thin adapter for an externally managed llama-server.
+
+    Inference, model loading, quantization, offload, batching, and KV cache
+    remain entirely owned by llama.cpp.
+    """
+
+    name = "llamacpp"
+    is_local = True
+    is_heavy_backend = True
+
+    def __init__(self, base_url=DEFAULT_LLAMACPP_BASE_URL, api_key=None):
+        super().__init__(base_url or DEFAULT_LLAMACPP_BASE_URL, api_key=api_key, name=self.name)
+
+    def available(self):
+        try:
+            self._get_json("/models", timeout=5)
+            return True
+        except Exception:  # noqa: BLE001 - availability probes are intentionally non-fatal
+            return False
+
+    def _get_json(self, path, timeout=10):
+        req = urllib.request.Request(f"{self.base_url}{path}", headers=self._headers())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.load(resp)
+
+    @property
+    def server_root(self):
+        return self.base_url[:-3] if self.base_url.endswith("/v1") else self.base_url
+
+    def model_available(self, model):
+        names = self.list_models()
+        if not names:
+            return None
+        # ``local`` is the documented single-server alias. llama-server has one
+        # loaded model even when /models reports its path or metadata name.
+        return bool(names) if model == "local" else model in names
+
+    def server_metadata(self):
+        """Best-effort llama-server health, properties, slots, and metrics."""
+        metadata = {}
+        for label, path in (("health", "/health"), ("properties", "/props"), ("slots", "/slots")):
+            try:
+                req = urllib.request.Request(f"{self.server_root}{path}", headers=self._headers())
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    metadata[label] = json.load(resp)
+            except Exception:  # noqa: BLE001 - endpoints vary by llama.cpp build
+                continue
+        try:
+            req = urllib.request.Request(f"{self.server_root}/metrics", headers=self._headers())
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                body = resp.read(16_384).decode("utf-8", errors="replace").strip()
+                if body:
+                    metadata["metrics"] = body
+        except Exception:  # noqa: BLE001 - metrics must be enabled server-side
+            pass
+        return metadata
+
+    def describe(self):
+        return f"llama.cpp @ {self.base_url} (external llama-server)"
+
+    def failure_message(self):
+        return (
+            f"llama.cpp provider is configured, but no server responded at {self.base_url}.\n\n"
+            "Start llama-server first, or change the base_url in your config.\n"
+            "Run: local-code model start qwen36 --gpu rtx3060\n"
+            "Or print flags: local-code llama command --profile qwen36-35b-a3b --gpu rtx3060"
+        )
+
+
 def build_provider(kind, *, base_url=None, api_key=None):
     """Construct a provider from a CLI/config selection.
 
-    kind: "ollama" | "openrouter" | "openai".
+    kind: "ollama" | "llamacpp" | "openrouter" | "openai".
     """
     kind = (kind or "ollama").lower()
     if kind == "ollama":
         return OllamaProvider(base_url or DEFAULT_OLLAMA)
+    if kind in {"llamacpp", "llama.cpp", "llama-cpp"}:
+        return LlamaCppProvider(base_url or DEFAULT_LLAMACPP_BASE_URL, api_key=api_key)
     if kind == "openrouter":
         key = api_key or os.environ.get("OPENROUTER_API_KEY")
         return OpenAICompatibleProvider(
@@ -298,4 +372,4 @@ def build_provider(kind, *, base_url=None, api_key=None):
     if kind in {"openai", "openai-compatible"}:
         key = api_key or os.environ.get("OPENAI_API_KEY")
         return OpenAICompatibleProvider(base_url or OPENAI_BASE_URL, api_key=key, name="openai")
-    raise ValueError(f"Unknown provider {kind!r}. Use ollama, openrouter, or openai.")
+    raise ValueError(f"Unknown provider {kind!r}. Use ollama, llamacpp, openrouter, or openai.")
