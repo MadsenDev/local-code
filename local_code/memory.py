@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from .config import LEGACY_MEMORY_DIR_NAME, MAX_HISTORY_MESSAGES, MEMORY_DIR_NAME
+from .intelligence import IntelligenceStore, atomic_write_text
 from .ui import clip
 
 
@@ -13,33 +14,44 @@ def memory_paths(workdir):
     legacy = root / LEGACY_MEMORY_DIR_NAME
     if not base.exists() and legacy.is_dir():
         shutil.copytree(legacy, base)
+    private = base / "private"
     return {
         "base": base,
+        "intelligence": base / "intelligence.json",
+        "private": private,
         "project": base / "project.md",
         "decisions": base / "decisions.md",
         "architecture": base / "architecture.md",
-        "runs": base / "runs.jsonl",
-        "chat_history": base / "chat_history.jsonl",
+        "runs": private / "runs.jsonl",
+        "chat_history": private / "chat_history.jsonl",
+        "preferences": private / "preferences.json",
         "gitignore": base / ".gitignore",
     }
 
 
 def ensure_memory_files(workdir):
+    """Create separated durable-fact and private interaction stores.
+
+    Existing root-level Markdown is imported by ``IntelligenceStore``. Existing
+    run/chat JSONL files are moved under ``.rist/private`` so they cannot be
+    mistaken for shareable repository intelligence.
+    """
     paths = memory_paths(workdir)
     paths["base"].mkdir(parents=True, exist_ok=True)
+    paths["private"].mkdir(parents=True, exist_ok=True)
     ensure_git_exclude(workdir)
-    defaults = {
-        "project": "# Project Notes\n\n- Purpose:\n- Stack:\n- Common commands:\n",
-        "decisions": "# Decisions\n\n- Date: \n- Decision: \n- Reason: \n",
-        "architecture": "# Architecture\n\n- Entry points:\n- Key modules:\n- Constraints:\n",
-    }
-    for key, content in defaults.items():
+    for filename, key in (("runs.jsonl", "runs"), ("chat_history.jsonl", "chat_history"), ("preferences.json", "preferences")):
+        legacy_path = paths["base"] / filename
+        if legacy_path.exists() and not paths[key].exists():
+            legacy_path.replace(paths[key])
+    for key in ("runs", "chat_history"):
         if not paths[key].exists():
-            paths[key].write_text(content, encoding="utf-8")
-    if not paths["runs"].exists():
-        paths["runs"].touch()
+            paths[key].touch()
+    if not paths["preferences"].exists():
+        atomic_write_text(paths["preferences"], "{}\n")
     if not paths["gitignore"].exists():
-        paths["gitignore"].write_text("*\n", encoding="utf-8")
+        atomic_write_text(paths["gitignore"], "*\n")
+    IntelligenceStore.load(paths["base"], sync_views=True)
     return paths
 
 
@@ -77,9 +89,6 @@ def load_repo_memory(workdir):
         text = paths[key].read_text(encoding="utf-8", errors="replace").strip()
         if text:
             chunks.append(f"{key}.md:\n{clip(text, 2000)}")
-    recent_runs = load_recent_runs(paths["runs"])
-    if recent_runs:
-        chunks.append("recent runs:\n" + recent_runs)
     return "\n\n".join(chunks)
 
 
@@ -138,9 +147,8 @@ def load_chat_history(workdir):
 def save_chat_history(workdir, history):
     path = memory_paths(workdir)["chat_history"]
     try:
-        with path.open("w", encoding="utf-8") as fh:
-            for msg in history:
-                fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
+        content = "".join(json.dumps(msg, ensure_ascii=False) + "\n" for msg in history)
+        atomic_write_text(path, content)
     except Exception:  # noqa: BLE001
         pass
 
@@ -148,6 +156,6 @@ def save_chat_history(workdir, history):
 def clear_chat_history(workdir):
     path = memory_paths(workdir)["chat_history"]
     try:
-        path.write_text("", encoding="utf-8")
+        atomic_write_text(path, "")
     except Exception:  # noqa: BLE001
         pass

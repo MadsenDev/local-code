@@ -4,6 +4,7 @@ __all__ = [
     "config",
     "contracts",
     "memory",
+    "intelligence",
     "models",
     "permissions",
     "tools",

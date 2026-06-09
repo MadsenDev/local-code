@@ -344,3 +344,21 @@ Rist cannot discover logs for manually started servers. Large MoE models
 are heavy, experimental backends; on 8–12 GB GPUs, avoid frequent model
 switching and increase context or batch sizes only after measuring a stable
 baseline.
+
+## Structured repository intelligence
+
+Rist stores durable repository knowledge in the versioned `.rist/intelligence.json`
+document. Typed records cover project identity, principles, facts, decisions,
+components, relationships, lifecycle status, conventions, workflows, and learned
+file associations. Every record has a stable ID, lifecycle status, confidence,
+source provenance, timestamps, and supersession links.
+
+The `.rist/project.md`, `.rist/architecture.md`, and `.rist/decisions.md` files are
+editable views. Rist imports supported bullet, status, and confidence edits and
+then renders the views back from the structured store. Existing Markdown files
+created by earlier releases are imported automatically.
+
+Repository intelligence is intentionally separate from private or short-lived
+state: chat history, run logs, and user preferences live under `.rist/private/`.
+This separation allows repository facts and interaction data to use different
+retention and sharing policies.
