@@ -1495,6 +1495,18 @@ class LocalPartner:
         messages.extend(self.history)
         messages.append({"role": "user", "content": original_prompt})
         messages.append({"role": "user", "content": (("Context to preserve:\n" + frontend_message + "\n\n") if frontend_message else "") + "Backend report:\n" + json.dumps(backend_report, ensure_ascii=False, indent=2)})
+        status = str((backend_report or {}).get("execution_status") or "")
+        if status and status != "applied":
+            messages.append(
+                {
+                    "role": "user",
+                    "content": (
+                        "IMPORTANT: No files were changed (or only some plan steps were applied). "
+                        "State this plainly as the first sentence of your reply. "
+                        "Do not imply the task was completed."
+                    ),
+                }
+            )
         started = time.monotonic()
         if self.on_token:
             reply = self._chat_streaming(self.frontend_model, messages)

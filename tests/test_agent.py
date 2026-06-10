@@ -770,3 +770,45 @@ class TestNoOpExecuteRejection:
         report = agent.run_contract({"goal": "set x to 2", "edit_policy": "execute"}, "")
 
         assert report["execution_status"] == "applied"
+
+
+class TestHonestFinalize:
+    def _partner(self, tmp_path):
+        return LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            mode="hybrid",
+        )
+
+    def _capture_chat(self, monkeypatch, partner):
+        seen = []
+
+        def fake_chat(model, messages):
+            seen.append([m["content"] for m in messages])
+            return "summary text"
+
+        monkeypatch.setattr(partner, "chat", fake_chat)
+        return seen
+
+    def test_directive_added_when_plan_not_applied(self, monkeypatch, tmp_path):
+        partner = self._partner(tmp_path)
+        seen = self._capture_chat(monkeypatch, partner)
+        report = {"summary": "x", "execution_status": "plan_not_applied"}
+
+        partner.frontend_finalize("fix it", report)
+
+        assert any("Do not imply the task was completed" in c for c in seen[0])
+
+    def test_no_directive_when_applied(self, monkeypatch, tmp_path):
+        partner = self._partner(tmp_path)
+        seen = self._capture_chat(monkeypatch, partner)
+        report = {"summary": "x", "execution_status": "applied", "files_changed": ["a.py"]}
+
+        partner.frontend_finalize("fix it", report)
+
+        assert not any("Do not imply the task was completed" in c for c in seen[0])
