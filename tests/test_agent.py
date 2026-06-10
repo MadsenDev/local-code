@@ -598,3 +598,59 @@ class TestApprovedPlanPrompt:
         agent = self._agent(tmp_path)
         prompt = agent.system_prompt({"goal": "x", "edit_policy": "execute"}, "")
         assert "An approved plan exists" not in prompt
+
+
+def scripted_chat(monkeypatch, agent, responses, seen=None):
+    """Replace agent.chat with a queue of canned JSON responses.
+
+    seen, when given, collects the message list content at each call so tests
+    can assert on pushback messages the harness injected.
+    """
+    queue = list(responses)
+
+    def fake_chat(messages):
+        if seen is not None:
+            seen.append([m["content"] for m in messages])
+        return queue.pop(0)
+
+    monkeypatch.setattr(agent, "chat", fake_chat)
+
+
+class TestVaguePlanPushback:
+    def _agent(self, tmp_path):
+        return LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+        )
+
+    VAGUE_FINAL = '{"tool":"final","args":{"summary":"plan ready","plan":["Improve the server settings"],"diff_summary":""}}'
+
+    def test_vague_plan_pushed_back_then_concrete_accepted(self, monkeypatch, tmp_path):
+        (tmp_path / "vite.config.ts").write_text("export default {}\n")
+        agent = self._agent(tmp_path)
+        concrete = (
+            '{"tool":"final","args":{"summary":"plan ready",'
+            '"plan":["Edit vite.config.ts — add host:true"],'
+            '"diff_summary":"--- a/vite.config.ts\\n+++ b/vite.config.ts\\n@@ -1 +1 @@\\n"}}'
+        )
+        seen = []
+        scripted_chat(monkeypatch, agent, [self.VAGUE_FINAL, concrete], seen)
+
+        report = agent.run_contract({"goal": "fix server", "edit_policy": "plan"}, "")
+
+        assert report["plan"] == ["Edit vite.config.ts — add host:true"]
+        assert report["needs_approval"] is True
+        assert "not concrete enough" in seen[1][-1]
+
+    def test_persistently_vague_plan_accepted_with_risk(self, monkeypatch, tmp_path):
+        agent = self._agent(tmp_path)
+        scripted_chat(monkeypatch, agent, [self.VAGUE_FINAL] * 3)
+
+        report = agent.run_contract({"goal": "fix server", "edit_policy": "plan"}, "")
+
+        assert report["needs_approval"] is True
+        assert any("too vague" in risk for risk in report["risks"])

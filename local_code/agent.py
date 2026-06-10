@@ -38,6 +38,7 @@ from .contracts import (
     normalize_contract,
     resolve_repo_file_hints,
     unwrap_frontend_reply_text,
+    validate_plan_report,
 )
 from .intelligence import DecisionService, IntelligenceStore, atomic_write_text, execute_decision_command
 from .memory import append_run_log, ensure_memory_files, load_chat_history, load_recent_runs, load_repo_memory, memory_paths, save_chat_history
@@ -718,6 +719,7 @@ class LocalCodeAgent:
         self._action_seen_counts: dict = {}
         self.cancel_event.clear()
         invalid_action_count = 0
+        plan_pushback_count = 0
 
         for step in range(1, self.max_steps + 1):
             if self.cancel_event.is_set():
@@ -884,6 +886,16 @@ class LocalCodeAgent:
                 report["files_changed"] = report["files_changed"] or sorted(tracker["files_changed"])
                 if contract.get("edit_policy") in {"plan", "propose"}:
                     report["needs_approval"] = True
+                    problems = validate_plan_report(report, self.workdir)
+                    if problems and plan_pushback_count < 2:
+                        plan_pushback_count += 1
+                        self.trace_print("plan final too vague; asking for a concrete plan")
+                        messages.append({"role": "user", "content": self.vague_plan_hint(problems)})
+                        continue
+                    if problems:
+                        report["risks"] = list(report["risks"]) + [
+                            "Plan may be too vague to apply mechanically: " + "; ".join(problems)[:300]
+                        ]
                 if contract.get("edit_policy") == "execute" and report["files_changed"]:
                     _, diff_stat = run_subprocess("git diff HEAD --stat", cwd=self.workdir, timeout=10)
                     if diff_stat.strip():
@@ -1016,6 +1028,18 @@ class LocalCodeAgent:
                 "Do not explain.",
                 "Do not invent tools.",
                 f"Error: {error}.{progress} {tool_hint}",
+            ]
+        )
+
+    def vague_plan_hint(self, problems):
+        return "\n".join(
+            [
+                "Your plan is not concrete enough to execute. Problems:",
+                *[f"- {p}" for p in problems],
+                "",
+                "Revise the plan and call final again.",
+                "Every plan step must name a real repo file and the exact change, or an exact command.",
+                "diff_summary must contain a real unified diff (--- a/path, +++ b/path, @@ hunks).",
             ]
         )
 
