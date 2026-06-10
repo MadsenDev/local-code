@@ -665,3 +665,96 @@ class TestVaguePlanPushback:
 
         assert report["needs_approval"] is True
         assert any("too vague" in risk for risk in report["risks"])
+
+
+class TestNoOpExecuteRejection:
+    def _agent(self, tmp_path):
+        return LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="allow",
+            verbosity="quiet",
+        )
+
+    def _contract(self, steps):
+        return {
+            "goal": "fix dev server",
+            "edit_policy": "execute",
+            "execution_strategy": "apply_approved_plan",
+            "approved_plan": {"steps": steps, "diff_summary": "", "files_read": []},
+        }
+
+    NOOP_FINAL = '{"tool":"final","args":{"summary":"nothing additional to do"}}'
+
+    def test_noop_final_pushed_back_then_edit_applied(self, monkeypatch, tmp_path):
+        (tmp_path / "vite.config.ts").write_text("server: { port: 3000 }\n")
+        agent = self._agent(tmp_path)
+        seen = []
+        scripted_chat(
+            monkeypatch,
+            agent,
+            [
+                self.NOOP_FINAL,
+                '{"tool":"replace_in_file","args":{"path":"vite.config.ts","old":"port: 3000","new":"host: true, port: 3000"}}',
+                '{"tool":"final","args":{"summary":"added host setting","files_changed":["vite.config.ts"]}}',
+            ],
+            seen,
+        )
+
+        report = agent.run_contract(self._contract(["Edit vite.config.ts — add host:true"]), "")
+
+        assert "host: true" in (tmp_path / "vite.config.ts").read_text()
+        assert report["execution_status"] == "applied"
+        assert "Unapplied steps" in seen[1][-1]
+        assert "vite.config.ts" in seen[1][-1]
+
+    def test_double_noop_becomes_honest_failure(self, monkeypatch, tmp_path):
+        agent = self._agent(tmp_path)
+        scripted_chat(monkeypatch, agent, [self.NOOP_FINAL, self.NOOP_FINAL])
+
+        report = agent.run_contract(self._contract(["Edit vite.config.ts — add host:true"]), "")
+
+        assert report["execution_status"] == "plan_not_applied"
+        assert report["summary"] == "The plan was approved but not applied."
+        assert any("not applied" in risk for risk in report["risks"])
+
+    def test_partial_application_flagged_with_missed_steps(self, monkeypatch, tmp_path):
+        (tmp_path / "vite.config.ts").write_text("server: { port: 3000 }\n")
+        (tmp_path / "package.json").write_text("{}\n")
+        agent = self._agent(tmp_path)
+        scripted_chat(
+            monkeypatch,
+            agent,
+            [
+                '{"tool":"replace_in_file","args":{"path":"vite.config.ts","old":"port: 3000","new":"host: true"}}',
+                '{"tool":"final","args":{"summary":"done","files_changed":["vite.config.ts"]}}',
+            ],
+        )
+
+        report = agent.run_contract(
+            self._contract(
+                ["Edit vite.config.ts — add host:true", "Edit package.json — add dev script"]
+            ),
+            "",
+        )
+
+        assert report["execution_status"] == "partially_applied"
+        assert any("package.json" in risk for risk in report["risks"])
+
+    def test_execute_without_approved_plan_unchanged(self, monkeypatch, tmp_path):
+        (tmp_path / "a.py").write_text("x = 1\n")
+        agent = self._agent(tmp_path)
+        scripted_chat(
+            monkeypatch,
+            agent,
+            [
+                '{"tool":"replace_in_file","args":{"path":"a.py","old":"x = 1","new":"x = 2"}}',
+                '{"tool":"final","args":{"summary":"done","files_changed":["a.py"]}}',
+            ],
+        )
+
+        report = agent.run_contract({"goal": "set x to 2", "edit_policy": "execute"}, "")
+
+        assert report["execution_status"] == "applied"

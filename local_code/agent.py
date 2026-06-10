@@ -29,6 +29,7 @@ from .model_profiles import classify_model
 from .context import build_context_usage
 from .providers import OllamaProvider
 from .contracts import (
+    compute_execution_status,
     has_database_context,
     has_pasted_context,
     infer_command_hints,
@@ -720,6 +721,7 @@ class LocalCodeAgent:
         self.cancel_event.clear()
         invalid_action_count = 0
         plan_pushback_count = 0
+        noop_final_count = 0
 
         for step in range(1, self.max_steps + 1):
             if self.cancel_event.is_set():
@@ -896,6 +898,37 @@ class LocalCodeAgent:
                         report["risks"] = list(report["risks"]) + [
                             "Plan may be too vague to apply mechanically: " + "; ".join(problems)[:300]
                         ]
+                approved_plan = contract.get("approved_plan") or {}
+                if contract.get("edit_policy") == "execute" and approved_plan:
+                    status, missed = compute_execution_status(
+                        approved_plan.get("steps") or [],
+                        report["files_changed"],
+                        report["commands_run"],
+                    )
+                    if status == "plan_not_applied" and noop_final_count == 0:
+                        noop_final_count += 1
+                        self.trace_print("no-op final in execute mode; asking backend to apply the approved plan")
+                        messages.append({"role": "user", "content": self.unapplied_plan_hint(approved_plan)})
+                        continue
+                    report["execution_status"] = status
+                    if status == "plan_not_applied":
+                        report["summary"] = "The plan was approved but not applied."
+                        report["risks"] = list(report["risks"]) + [
+                            "Approved plan steps were not applied: "
+                            + "; ".join(str(s) for s in (approved_plan.get("steps") or []))[:300]
+                        ]
+                    elif status == "partially_applied":
+                        report["risks"] = list(report["risks"]) + [
+                            "Plan steps not verifiably applied: " + "; ".join(missed)[:300]
+                        ]
+                    if status != "applied":
+                        self.transcript_print(
+                            "no edits were made" if status == "plan_not_applied" else "plan only partially applied",
+                            [str(s)[:220] for s in (missed or approved_plan.get("steps") or [])][:5],
+                            color=UI.YELLOW,
+                        )
+                elif contract.get("edit_policy") == "execute" and report["files_changed"]:
+                    report["execution_status"] = "applied"
                 if contract.get("edit_policy") == "execute" and report["files_changed"]:
                     _, diff_stat = run_subprocess("git diff HEAD --stat", cwd=self.workdir, timeout=10)
                     if diff_stat.strip():
@@ -1040,6 +1073,19 @@ class LocalCodeAgent:
                 "Revise the plan and call final again.",
                 "Every plan step must name a real repo file and the exact change, or an exact command.",
                 "diff_summary must contain a real unified diff (--- a/path, +++ b/path, @@ hunks).",
+            ]
+        )
+
+    def unapplied_plan_hint(self, approved_plan):
+        steps = approved_plan.get("steps") or []
+        return "\n".join(
+            [
+                "You finished without applying the approved plan. No files were changed and no plan commands were run.",
+                "Unapplied steps:",
+                *[f"{index}. {step}" for index, step in enumerate(steps, start=1)],
+                "",
+                "Apply them now using replace_in_file, write_file, replace_lines, insert_after, or run_command.",
+                "If a step truly cannot be applied, apply the others and state per step why it cannot be applied.",
             ]
         )
 
