@@ -591,6 +591,8 @@ class TestApprovedPlanPrompt:
         prompt = agent.system_prompt(contract, "")
         assert "An approved plan exists" in prompt
         assert "not to re-investigate" in prompt
+        assert "do not re-evaluate whether the changes are justified" in prompt
+        assert prompt.index("not to re-investigate") < prompt.index("inspect, then apply")
 
     def test_system_prompt_omits_block_without_approved_plan(self, tmp_path):
         agent = self._agent(tmp_path)

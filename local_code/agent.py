@@ -225,16 +225,28 @@ class LocalCodeAgent:
             return bool(self.confirm_hook(kind, label, content))
         return confirm_action(kind, label, content, self.ui)
 
+    def _approved_plan_rules_block(self, contract):
+        """Rules injected when the contract carries a user-approved plan.
+
+        Rendered inside system_prompt's Rules list; the 12-space indent matches
+        the template body so the bullets align with the surrounding rules.
+        """
+        if not contract.get("approved_plan"):
+            return ""
+        indent = " " * 12
+        lines = [
+            "- An approved plan exists in the contract's approved_plan field. "
+            "Your job is to apply each step, not to re-investigate.",
+            "- The plan is already approved; do not re-evaluate whether the changes are justified.",
+            "- Read a file only immediately before editing it; do not do exploratory reads — "
+            "the plan already defines what needs changing.",
+            "- Finish only when every step is applied, or report exactly "
+            "which steps you could not apply and why.",
+        ]
+        return ("\n" + indent).join(lines) + "\n" + indent
+
     def system_prompt(self, contract, memory_text):
-        approved_plan_rules = ""
-        if contract.get("approved_plan"):
-            approved_plan_rules = (
-                "- An approved plan exists in the contract's approved_plan field. "
-                "Your job is to apply each step, not to re-investigate.\n"
-                "            - Read a file only if you are about to edit it.\n"
-                "            - Finish only when every step is applied, or report exactly "
-                "which steps you could not apply and why.\n            "
-            )
+        approved_plan_rules = self._approved_plan_rules_block(contract)
         return textwrap.dedent(
             f"""\
             You are the backend half of a local coding partner.
