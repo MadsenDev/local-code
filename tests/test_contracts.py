@@ -210,6 +210,13 @@ class TestComputeExecutionStatus:
         status, _ = compute_execution_status(["Improve things"], [], [])
         assert status == "plan_not_applied"
 
+    def test_unrecognized_command_run_counts_as_applied(self):
+        status, missed = compute_execution_status(
+            ["Run git init to create the repo"], [], ["git init"]
+        )
+        assert status == "applied"
+        assert missed == []
+
     def test_none_inputs_are_safe(self):
         status, missed = compute_execution_status(None, None, None)
         assert status == "plan_not_applied"

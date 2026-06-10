@@ -409,7 +409,10 @@ def compute_execution_status(plan_steps, files_changed, commands_run):
     if not changed and not run:
         return "plan_not_applied", missed
     if not verifiable:
-        return ("applied" if changed else "plan_not_applied"), missed
+        # Reaching here means changed or run is non-empty (the earlier guard
+        # returned otherwise) — work happened even if no step is mechanically
+        # checkable, so do not report a false "plan_not_applied".
+        return "applied", missed
     if not missed:
         return "applied", missed
     return "partially_applied", missed

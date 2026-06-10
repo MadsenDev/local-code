@@ -112,7 +112,7 @@ A *contract* is a plain dict passed from frontend to backend specifying:
 
 ### Proposal workflow
 
-When `edit_policy` is `plan` or `propose`, the backend produces a report without writing files. `LocalPartner` stores this as `pending_plan` and prompts the user. On approval (`/apply` or a yes-match), `apply_pending_plan()` re-runs the same contract with `edit_policy="execute"`.
+When `edit_policy` is `plan` or `propose`, the backend produces a report without writing files. `LocalPartner` stores this as `pending_plan` and prompts the user. On approval (`/apply` or a yes-match), `apply_pending_plan()` re-runs the contract with `edit_policy="execute"`, `execution_strategy="apply_approved_plan"`, and the approved plan attached as `approved_plan` (steps, diff summary, files read). The backend system prompt then instructs the model to apply the steps rather than re-investigate; the tool loop rejects a first no-op `final` (listing unapplied steps), and stamps a tracker-derived `execution_status` (`applied` / `partially_applied` / `plan_not_applied`) that `frontend_finalize()` uses to force an honest user-facing summary. Plan/propose finals are validated for concreteness (`validate_plan_report`) with up to two in-loop pushbacks before being accepted with a vagueness risk.
 
 ### Modes
 
