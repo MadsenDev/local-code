@@ -6,7 +6,7 @@ from .config import EDIT_INTENT_RE
 
 VALID_EDIT_POLICIES = {"inspect", "plan", "propose", "execute"}
 VALID_TASK_KINDS = {"conversation", "inspection", "edit_existing", "bootstrap_new"}
-VALID_EXECUTION_STRATEGIES = {"direct", "inspect_then_execute", "plan_only"}
+VALID_EXECUTION_STRATEGIES = {"direct", "inspect_then_execute", "plan_only", "apply_approved_plan"}
 PROJECT_MARKERS = (
     "package.json",
     "pyproject.toml",
@@ -320,6 +320,7 @@ def normalize_backend_report(report, fallback_message=""):
         "decision_candidates": report.get("decision_candidates") or [],
         "decision_conflicts": report.get("decision_conflicts") or [],
         "requires_deviation_explanation": bool(report.get("requires_deviation_explanation", False)),
+        "execution_status": str(report.get("execution_status") or ""),
     }
 
 
@@ -366,6 +367,44 @@ def validate_plan_report(report, workdir):
                 "(--- a/path, +++ b/path, @@ hunks) for the file edits in the plan."
             )
     return problems
+
+
+def compute_execution_status(plan_steps, files_changed, commands_run):
+    """Harness-derived status of an approved plan after an execute run.
+
+    Returns (status, missed_steps) where status is one of "applied",
+    "partially_applied", or "plan_not_applied". A step is covered when a file
+    it names appears in files_changed (exact or basename match) or a command
+    it names matches a commands_run entry by prefix. Steps naming no file or
+    command cannot be verified mechanically and are excluded.
+    """
+    changed = [str(p) for p in files_changed or []]
+    changed_names = {Path(p).name for p in changed}
+    run = [str(c) for c in commands_run or []]
+    missed = []
+    verifiable = 0
+    for step in plan_steps or []:
+        text = str(step)
+        file_refs = infer_file_hints(text)
+        command_refs = infer_command_hints(text)
+        if not file_refs and not command_refs:
+            continue
+        verifiable += 1
+        file_hit = any(ref in changed or Path(ref).name in changed_names for ref in file_refs)
+        command_hit = any(
+            r == cmd or r.startswith(cmd + " ") or cmd.startswith(r + " ")
+            for cmd in command_refs
+            for r in run
+        )
+        if not (file_hit or command_hit):
+            missed.append(text)
+    if not changed and not run:
+        return "plan_not_applied", missed
+    if not verifiable:
+        return ("applied" if changed else "plan_not_applied"), missed
+    if not missed:
+        return "applied", missed
+    return "partially_applied", missed
 
 
 def load_json_layers(text, max_depth=3):

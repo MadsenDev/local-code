@@ -1,4 +1,5 @@
 from local_code.contracts import (
+    compute_execution_status,
     infer_file_hints,
     inspect_workdir_state,
     normalize_backend_report,
@@ -159,3 +160,58 @@ class TestValidatePlanReport:
         problems = validate_plan_report(report, str(tmp_path))
         assert len(problems) == 1
         assert "diff_summary" in problems[0]
+
+
+class TestComputeExecutionStatus:
+    STEPS = [
+        "Edit vite.config.ts — add host:true",
+        "Run npm install to resolve dependencies",
+    ]
+
+    def test_all_steps_covered_is_applied(self):
+        status, missed = compute_execution_status(
+            self.STEPS, ["vite.config.ts"], ["npm install"]
+        )
+        assert status == "applied"
+        assert missed == []
+
+    def test_file_matched_by_basename(self):
+        status, _ = compute_execution_status(
+            ["Edit vite.config.ts — add host"], ["/abs/path/vite.config.ts"], []
+        )
+        assert status == "applied"
+
+    def test_nothing_done_is_plan_not_applied(self):
+        status, missed = compute_execution_status(self.STEPS, [], [])
+        assert status == "plan_not_applied"
+        assert len(missed) == 2
+
+    def test_some_steps_missed_is_partially_applied(self):
+        status, missed = compute_execution_status(self.STEPS, ["vite.config.ts"], [])
+        assert status == "partially_applied"
+        assert missed == ["Run npm install to resolve dependencies"]
+
+    def test_unverifiable_steps_are_excluded(self):
+        status, missed = compute_execution_status(
+            ["Think about the architecture", "Edit app.py — fix bug"],
+            ["app.py"],
+            [],
+        )
+        assert status == "applied"
+        assert missed == []
+
+    def test_no_verifiable_steps_falls_back_to_files_changed(self):
+        status, _ = compute_execution_status(["Improve things"], ["app.py"], [])
+        assert status == "applied"
+        status, _ = compute_execution_status(["Improve things"], [], [])
+        assert status == "plan_not_applied"
+
+
+class TestExecutionStatusField:
+    def test_normalize_passes_execution_status_through(self):
+        report = normalize_backend_report({"summary": "x", "execution_status": "applied"})
+        assert report["execution_status"] == "applied"
+
+    def test_normalize_defaults_execution_status_to_empty(self):
+        report = normalize_backend_report({"summary": "x"})
+        assert report["execution_status"] == ""
