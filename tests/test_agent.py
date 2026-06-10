@@ -611,6 +611,8 @@ def scripted_chat(monkeypatch, agent, responses, seen=None):
     def fake_chat(messages):
         if seen is not None:
             seen.append([m["content"] for m in messages])
+        if not queue:
+            raise AssertionError("scripted_chat: response queue exhausted")
         return queue.pop(0)
 
     monkeypatch.setattr(agent, "chat", fake_chat)
@@ -651,6 +653,15 @@ class TestVaguePlanPushback:
         scripted_chat(monkeypatch, agent, [self.VAGUE_FINAL] * 3)
 
         report = agent.run_contract({"goal": "fix server", "edit_policy": "plan"}, "")
+
+        assert report["needs_approval"] is True
+        assert any("too vague" in risk for risk in report["risks"])
+
+    def test_propose_mode_gets_same_pushback(self, monkeypatch, tmp_path):
+        agent = self._agent(tmp_path)
+        scripted_chat(monkeypatch, agent, [self.VAGUE_FINAL] * 3)
+
+        report = agent.run_contract({"goal": "fix server", "edit_policy": "propose"}, "")
 
         assert report["needs_approval"] is True
         assert any("too vague" in risk for risk in report["risks"])

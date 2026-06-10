@@ -124,6 +124,10 @@ class TestValidatePlanReport:
         report = self._report(["Run npm install to resolve dependencies"], "")
         assert validate_plan_report(report, str(tmp_path)) == []
 
+    def test_shell_command_step_passes(self, tmp_path):
+        report = self._report(["Run `git stash` to save local changes"], "")
+        assert validate_plan_report(report, str(tmp_path)) == []
+
     def test_edit_step_without_diff_markers_fails(self, tmp_path):
         (tmp_path / "app.py").write_text("x = 1\n")
         report = self._report(["Edit app.py — set x to 2"], "just a description")

@@ -328,6 +328,9 @@ def normalize_backend_report(report, fallback_message=""):
 # pass validation; command detection below is limited to infer_command_hints's
 # known runners (npm, pytest, cargo, ...).
 PLAN_CREATE_RE = re.compile(r"\b(create|add|new file|scaffold|generate)\b", re.I)
+# infer_command_hints only knows package/test runners; treat explicit run/exec
+# verbs, shell names, and backtick-quoted commands as command steps too.
+BROAD_COMMAND_RE = re.compile(r"\b(run|execute|git|bash|sh)\b|`[^`]+`", re.I)
 DIFF_MARKERS = ("--- ", "+++ ", "@@")
 
 
@@ -349,7 +352,7 @@ def validate_plan_report(report, workdir):
         file_hints = infer_file_hints(text)
         existing = resolve_repo_file_hints(workdir, file_hints)
         is_creation = bool(file_hints and PLAN_CREATE_RE.search(text))
-        is_command = bool(infer_command_hints(text))
+        is_command = bool(infer_command_hints(text)) or bool(BROAD_COMMAND_RE.search(text))
         if existing or is_creation:
             needs_diff = True
             continue
