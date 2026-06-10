@@ -743,6 +743,18 @@ class TestNoOpExecuteRejection:
         assert report["execution_status"] == "partially_applied"
         assert any("package.json" in risk for risk in report["risks"])
 
+    def test_fabricated_files_changed_does_not_dodge_rejection(self, monkeypatch, tmp_path):
+        agent = self._agent(tmp_path)
+        lying_final = '{"tool":"final","args":{"summary":"done","files_changed":["vite.config.ts"]}}'
+        seen = []
+        scripted_chat(monkeypatch, agent, [lying_final, lying_final], seen)
+
+        report = agent.run_contract(self._contract(["Edit vite.config.ts — add host:true"]), "")
+
+        assert "Unapplied steps" in seen[1][-1]
+        assert report["execution_status"] == "plan_not_applied"
+        assert report["summary"] == "The plan was approved but not applied."
+
     def test_execute_without_approved_plan_unchanged(self, monkeypatch, tmp_path):
         (tmp_path / "a.py").write_text("x = 1\n")
         agent = self._agent(tmp_path)

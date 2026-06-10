@@ -900,11 +900,17 @@ class LocalCodeAgent:
                         ]
                 approved_plan = contract.get("approved_plan") or {}
                 if contract.get("edit_policy") == "execute" and approved_plan:
+                    # Status is derived from the loop's own tracker, never from
+                    # model-claimed report fields — a fabricated files_changed
+                    # must not bypass the no-op rejection.
                     status, missed = compute_execution_status(
                         approved_plan.get("steps") or [],
-                        report["files_changed"],
-                        report["commands_run"],
+                        sorted(tracker["files_changed"]),
+                        tracker["commands_run"],
                     )
+                    # One retry per backend run by design: first no-op final gets
+                    # pushed back with the unapplied steps, the second becomes an
+                    # honest failure report.
                     if status == "plan_not_applied" and noop_final_count == 0:
                         noop_final_count += 1
                         self.trace_print("no-op final in execute mode; asking backend to apply the approved plan")
@@ -927,7 +933,7 @@ class LocalCodeAgent:
                             [str(s)[:220] for s in (missed or approved_plan.get("steps") or [])][:5],
                             color=UI.YELLOW,
                         )
-                elif contract.get("edit_policy") == "execute" and report["files_changed"]:
+                elif contract.get("edit_policy") == "execute" and tracker["files_changed"]:
                     report["execution_status"] = "applied"
                 if contract.get("edit_policy") == "execute" and report["files_changed"]:
                     _, diff_stat = run_subprocess("git diff HEAD --stat", cwd=self.workdir, timeout=10)
@@ -1078,6 +1084,12 @@ class LocalCodeAgent:
 
     def unapplied_plan_hint(self, approved_plan):
         steps = approved_plan.get("steps") or []
+        if not steps:
+            return (
+                "You finished without applying the approved plan. No files were changed "
+                "and no plan commands were run. Re-read the contract's approved_plan and task, "
+                "apply the requested changes, then call final."
+            )
         return "\n".join(
             [
                 "You finished without applying the approved plan. No files were changed and no plan commands were run.",
