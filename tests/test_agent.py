@@ -488,3 +488,62 @@ class TestToolCalling:
         action, _ = agent.request_action([{"role": "system", "content": "test"}], {"edit_policy": "inspect"})
 
         assert action == {"tool": "final", "args": {"summary": "fallback"}}
+
+
+class TestApprovedPlanCarriage:
+    def _partner(self, tmp_path):
+        return LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            mode="hybrid",
+        )
+
+    def test_apply_pending_plan_attaches_approved_plan(self, monkeypatch, tmp_path):
+        partner = self._partner(tmp_path)
+        partner.pending_plan = {
+            "original_prompt": "fix the dev server",
+            "frontend_message": "",
+            "contract": {"goal": "fix the dev server", "edit_policy": "plan"},
+            "report": {
+                "plan": ["Edit vite.config.ts — add host:true", "Run npm install"],
+                "diff_summary": "--- a/vite.config.ts\n+++ b/vite.config.ts\n@@ -1 +1 @@\n",
+                "files_read": ["vite.config.ts"],
+            },
+        }
+        seen = {}
+
+        def fake_run_backend(contract):
+            seen["contract"] = contract
+            return {"summary": "done", "commands_run": [], "files_read": [],
+                    "files_changed": ["vite.config.ts"], "needs_approval": False}
+
+        monkeypatch.setattr(partner, "_run_backend", fake_run_backend)
+        monkeypatch.setattr(partner, "frontend_finalize", lambda *args, **kw: "applied")
+
+        reply = partner.apply_pending_plan()
+
+        assert reply == "applied"
+        contract = seen["contract"]
+        assert contract["edit_policy"] == "execute"
+        assert contract["execution_strategy"] == "apply_approved_plan"
+        assert contract["approved_plan"]["steps"] == [
+            "Edit vite.config.ts — add host:true",
+            "Run npm install",
+        ]
+        assert contract["approved_plan"]["diff_summary"].startswith("--- a/")
+        assert contract["approved_plan"]["files_read"] == ["vite.config.ts"]
+
+    def test_intent_scaffold_skips_approved_plan_contracts(self, monkeypatch, tmp_path):
+        partner = self._partner(tmp_path)
+
+        def fail_intent(contract):
+            raise AssertionError("intent analysis must not run for approved plans")
+
+        monkeypatch.setattr(partner, "_intent_analysis", fail_intent)
+        contract = {"goal": "x", "approved_plan": {"steps": ["Edit a.py"]}}
+        assert partner._contract_with_intent_scaffold(contract) is contract

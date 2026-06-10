@@ -1525,6 +1525,8 @@ class LocalPartner:
     )
 
     def _contract_with_intent_scaffold(self, contract):
+        if contract.get("approved_plan"):
+            return contract
         if contract.get("intent_analysis"):
             return contract
         if contract.get("task_kind") == "conversation":
@@ -1675,7 +1677,13 @@ class LocalPartner:
             return None
         contract = dict(self.pending_plan["contract"])
         contract["edit_policy"] = "execute"
-        contract["execution_strategy"] = "inspect_then_execute"
+        contract["execution_strategy"] = "apply_approved_plan"
+        plan_report = self.pending_plan.get("report") or {}
+        contract["approved_plan"] = {
+            "steps": list(plan_report.get("plan") or []),
+            "diff_summary": str(plan_report.get("diff_summary") or ""),
+            "files_read": list(plan_report.get("files_read") or []),
+        }
         self.milestone("applying approved plan")
         report = self._run_backend(contract)
         reply = self.frontend_finalize(self.pending_plan["original_prompt"], report, self.pending_plan.get("frontend_message", ""))
