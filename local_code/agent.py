@@ -226,6 +226,15 @@ class LocalCodeAgent:
         return confirm_action(kind, label, content, self.ui)
 
     def system_prompt(self, contract, memory_text):
+        approved_plan_rules = ""
+        if contract.get("approved_plan"):
+            approved_plan_rules = (
+                "- An approved plan exists in the contract's approved_plan field. "
+                "Your job is to apply each step, not to re-investigate.\n"
+                "            - Read a file only if you are about to edit it.\n"
+                "            - Finish only when every step is applied, or report exactly "
+                "which steps you could not apply and why.\n            "
+            )
         return textwrap.dedent(
             f"""\
             You are the backend half of a local coding partner.
@@ -245,7 +254,7 @@ class LocalCodeAgent:
             {"read-only inspection; only repo_map, repo_overview, list_files, search_files, read_file, and final are allowed." if contract.get("read_only") or contract.get("edit_policy") == "inspect" else "full tool mode subject to permissions and edit_policy."}
 
             Rules:
-            - Follow the contract strictly.
+            {approved_plan_rules}- Follow the contract strictly.
             - If the contract includes intent_analysis, use it as the first-pass interpretation of the user's actual goal, non-goals, needed context, risks, and success criteria.
             - Before editing, explicitly satisfy the intent_analysis needed_context where applicable and avoid the not_the_goal items.
             - If the contract contains pasted context/output, analyze that pasted evidence first.

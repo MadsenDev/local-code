@@ -547,3 +547,52 @@ class TestApprovedPlanCarriage:
         monkeypatch.setattr(partner, "_intent_analysis", fail_intent)
         contract = {"goal": "x", "approved_plan": {"steps": ["Edit a.py"]}}
         assert partner._contract_with_intent_scaffold(contract) is contract
+
+    def test_apply_pending_plan_tolerates_missing_report(self, monkeypatch, tmp_path):
+        partner = self._partner(tmp_path)
+        partner.pending_plan = {
+            "original_prompt": "fix it",
+            "frontend_message": "",
+            "contract": {"goal": "fix it", "edit_policy": "plan"},
+            "report": None,
+        }
+        seen = {}
+
+        def fake_run_backend(contract):
+            seen["contract"] = contract
+            return {"summary": "done", "commands_run": [], "files_read": [],
+                    "files_changed": [], "needs_approval": False}
+
+        monkeypatch.setattr(partner, "_run_backend", fake_run_backend)
+        monkeypatch.setattr(partner, "frontend_finalize", lambda *args, **kw: "ok")
+
+        assert partner.apply_pending_plan() == "ok"
+        assert seen["contract"]["approved_plan"] == {"steps": [], "diff_summary": "", "files_read": []}
+
+
+class TestApprovedPlanPrompt:
+    def _agent(self, tmp_path):
+        return LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+        )
+
+    def test_system_prompt_includes_approved_plan_rules(self, tmp_path):
+        agent = self._agent(tmp_path)
+        contract = {
+            "goal": "fix dev server",
+            "edit_policy": "execute",
+            "approved_plan": {"steps": ["Edit vite.config.ts — add host:true"]},
+        }
+        prompt = agent.system_prompt(contract, "")
+        assert "An approved plan exists" in prompt
+        assert "not to re-investigate" in prompt
+
+    def test_system_prompt_omits_block_without_approved_plan(self, tmp_path):
+        agent = self._agent(tmp_path)
+        prompt = agent.system_prompt({"goal": "x", "edit_policy": "execute"}, "")
+        assert "An approved plan exists" not in prompt
