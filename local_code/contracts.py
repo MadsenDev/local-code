@@ -323,6 +323,9 @@ def normalize_backend_report(report, fallback_message=""):
     }
 
 
+# Deliberately broad: "add"/"generate" count as creation verbs so new-file steps
+# pass validation; command detection below is limited to infer_command_hints's
+# known runners (npm, pytest, cargo, ...).
 PLAN_CREATE_RE = re.compile(r"\b(create|add|new file|scaffold|generate)\b", re.I)
 DIFF_MARKERS = ("--- ", "+++ ", "@@")
 
@@ -330,16 +333,16 @@ DIFF_MARKERS = ("--- ", "+++ ", "@@")
 def validate_plan_report(report, workdir):
     """Check that a plan/propose report is concrete enough to apply mechanically.
 
-    Returns a list of human-readable problems; an empty list means the plan is
-    appliable. A step is concrete when it references an existing repo file, a
-    new file it explicitly creates, or a runnable command. If any step is a
-    file edit, diff_summary must contain real unified-diff markers.
+    Returns a list of human-readable problems; an empty list means the plan can
+    be applied mechanically. A step is concrete when it references an existing
+    repo file, a new file it explicitly creates, or a runnable command. If any
+    step is a file edit, diff_summary must contain real unified-diff markers.
     """
     problems = []
     steps = report.get("plan") or []
     if not steps:
         return ["The plan is empty. Provide one step per concrete change."]
-    has_edit_step = False
+    needs_diff = False
     for index, step in enumerate(steps, start=1):
         text = str(step)
         file_hints = infer_file_hints(text)
@@ -347,7 +350,7 @@ def validate_plan_report(report, workdir):
         is_creation = bool(file_hints and PLAN_CREATE_RE.search(text))
         is_command = bool(infer_command_hints(text))
         if existing or is_creation:
-            has_edit_step = True
+            needs_diff = True
             continue
         if is_command:
             continue
@@ -355,7 +358,7 @@ def validate_plan_report(report, workdir):
             f"Step {index} names no existing repo file and no runnable command: "
             f"{text[:120]!r}. Name the exact file and change, or the exact command."
         )
-    if has_edit_step:
+    if needs_diff:
         diff = str(report.get("diff_summary") or "")
         if not all(marker in diff for marker in DIFF_MARKERS):
             problems.append(

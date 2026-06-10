@@ -149,3 +149,13 @@ class TestValidatePlanReport:
         problems = validate_plan_report(report, str(tmp_path))
         assert len(problems) == 1
         assert "Step 1" in problems[0]
+
+    def test_mixed_command_and_edit_plan_without_diff_fails(self, tmp_path):
+        (tmp_path / "app.py").write_text("x = 1\n")
+        report = self._report(
+            ["Run npm install to resolve dependencies", "Edit app.py — set x to 2"],
+            "",
+        )
+        problems = validate_plan_report(report, str(tmp_path))
+        assert len(problems) == 1
+        assert "diff_summary" in problems[0]
