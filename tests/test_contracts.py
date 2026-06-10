@@ -206,6 +206,18 @@ class TestComputeExecutionStatus:
         status, _ = compute_execution_status(["Improve things"], [], [])
         assert status == "plan_not_applied"
 
+    def test_none_inputs_are_safe(self):
+        status, missed = compute_execution_status(None, None, None)
+        assert status == "plan_not_applied"
+        assert missed == []
+
+    def test_step_covered_when_only_file_side_matches(self):
+        status, missed = compute_execution_status(
+            ["Edit app.py and run npm install"], ["app.py"], []
+        )
+        assert status == "applied"
+        assert missed == []
+
 
 class TestExecutionStatusField:
     def test_normalize_passes_execution_status_through(self):

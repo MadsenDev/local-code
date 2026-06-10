@@ -374,12 +374,17 @@ def compute_execution_status(plan_steps, files_changed, commands_run):
 
     Returns (status, missed_steps) where status is one of "applied",
     "partially_applied", or "plan_not_applied". A step is covered when a file
-    it names appears in files_changed (exact or basename match) or a command
-    it names matches a commands_run entry by prefix. Steps naming no file or
-    command cannot be verified mechanically and are excluded.
+    it names appears in files_changed (exact path or basename; basename
+    matching may produce false positives when multiple files share a name),
+    or a command extracted from the step text is a prefix of — or is prefixed
+    by — a commands_run entry (bidirectional, because plan steps carry
+    natural-language trailing text like "npm install to resolve deps").
+    Steps naming no file or command cannot be verified mechanically and are
+    excluded.
     """
     changed = [str(p) for p in files_changed or []]
     changed_names = {Path(p).name for p in changed}
+    changed_set = set(changed)
     run = [str(c) for c in commands_run or []]
     missed = []
     verifiable = 0
@@ -390,7 +395,7 @@ def compute_execution_status(plan_steps, files_changed, commands_run):
         if not file_refs and not command_refs:
             continue
         verifiable += 1
-        file_hit = any(ref in changed or Path(ref).name in changed_names for ref in file_refs)
+        file_hit = any(ref in changed_set or Path(ref).name in changed_names for ref in file_refs)
         command_hit = any(
             r == cmd or r.startswith(cmd + " ") or cmd.startswith(r + " ")
             for cmd in command_refs
