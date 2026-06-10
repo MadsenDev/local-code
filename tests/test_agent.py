@@ -812,3 +812,12 @@ class TestHonestFinalize:
         partner.frontend_finalize("fix it", report)
 
         assert not any("Do not imply the task was completed" in c for c in seen[0])
+
+    def test_directive_added_when_partially_applied(self, monkeypatch, tmp_path):
+        partner = self._partner(tmp_path)
+        seen = self._capture_chat(monkeypatch, partner)
+        report = {"summary": "x", "execution_status": "partially_applied"}
+
+        partner.frontend_finalize("fix it", report)
+
+        assert any("Only some planned changes" in c for c in seen[0])

@@ -1497,16 +1497,20 @@ class LocalPartner:
         messages.append({"role": "user", "content": (("Context to preserve:\n" + frontend_message + "\n\n") if frontend_message else "") + "Backend report:\n" + json.dumps(backend_report, ensure_ascii=False, indent=2)})
         status = str((backend_report or {}).get("execution_status") or "")
         if status and status != "applied":
-            messages.append(
-                {
-                    "role": "user",
-                    "content": (
-                        "IMPORTANT: No files were changed (or only some plan steps were applied). "
-                        "State this plainly as the first sentence of your reply. "
-                        "Do not imply the task was completed."
-                    ),
-                }
-            )
+            if status == "partially_applied":
+                directive = (
+                    "IMPORTANT: Only some planned changes were applied; "
+                    "the remaining steps were not written to disk. "
+                    "State this plainly as the first sentence of your reply. "
+                    "Do not imply the full task was completed."
+                )
+            else:
+                directive = (
+                    "IMPORTANT: No files were changed. The approved plan was not applied. "
+                    "State this plainly as the first sentence of your reply. "
+                    "Do not imply the task was completed."
+                )
+            messages.append({"role": "user", "content": directive})
         started = time.monotonic()
         if self.on_token:
             reply = self._chat_streaming(self.frontend_model, messages)
