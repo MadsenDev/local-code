@@ -3,6 +3,7 @@ from local_code.contracts import (
     inspect_workdir_state,
     normalize_backend_report,
     normalize_contract,
+    validate_plan_report,
 )
 
 
@@ -98,3 +99,53 @@ class TestNormalizeContract:
         )
         assert contract["task_kind"] == "bootstrap_new"
         assert any("non-empty and not yet a project" in item for item in contract["constraints"])
+
+
+class TestValidatePlanReport:
+    def _report(self, plan, diff=""):
+        return {"plan": plan, "diff_summary": diff}
+
+    def test_concrete_plan_with_diff_passes(self, tmp_path):
+        (tmp_path / "vite.config.ts").write_text("export default {}\n")
+        report = self._report(
+            ["Edit vite.config.ts — add host:true to server settings"],
+            "--- a/vite.config.ts\n+++ b/vite.config.ts\n@@ -1 +1,2 @@\n",
+        )
+        assert validate_plan_report(report, str(tmp_path)) == []
+
+    def test_step_without_file_or_command_fails(self, tmp_path):
+        report = self._report(["Improve the server settings"], "")
+        problems = validate_plan_report(report, str(tmp_path))
+        assert len(problems) == 1
+        assert "Step 1" in problems[0]
+
+    def test_command_step_passes_without_diff(self, tmp_path):
+        report = self._report(["Run npm install to resolve dependencies"], "")
+        assert validate_plan_report(report, str(tmp_path)) == []
+
+    def test_edit_step_without_diff_markers_fails(self, tmp_path):
+        (tmp_path / "app.py").write_text("x = 1\n")
+        report = self._report(["Edit app.py — set x to 2"], "just a description")
+        problems = validate_plan_report(report, str(tmp_path))
+        assert len(problems) == 1
+        assert "diff_summary" in problems[0]
+
+    def test_create_new_file_step_passes(self, tmp_path):
+        report = self._report(
+            ["Create src/config.py with the default settings"],
+            "--- /dev/null\n+++ b/src/config.py\n@@ -0,0 +1,3 @@\n",
+        )
+        assert validate_plan_report(report, str(tmp_path)) == []
+
+    def test_empty_plan_fails(self, tmp_path):
+        problems = validate_plan_report(self._report([]), str(tmp_path))
+        assert problems == ["The plan is empty. Provide one step per concrete change."]
+
+    def test_nonexistent_file_without_create_verb_fails(self, tmp_path):
+        report = self._report(
+            ["Edit nope.ts — change settings"],
+            "--- a/nope.ts\n+++ b/nope.ts\n@@ -1 +1 @@\n",
+        )
+        problems = validate_plan_report(report, str(tmp_path))
+        assert len(problems) == 1
+        assert "Step 1" in problems[0]
