@@ -12,6 +12,7 @@ from rich.text import Text
 
 from local_code.hardware import detect_hardware
 from local_code.routing import resolve_model_routing
+from local_code.tui.repository import RepositoryBadge
 
 
 Callback = Callable[[object], None]
@@ -145,6 +146,11 @@ def build_commands() -> list[Command]:
     for scope in ("edit", "command"):
         for mode in ("ask", "allow", "deny"):
             add(id=f"permission.{scope}.{mode}", title=f"{scope.title()} permission → {mode.title()}", subtitle=f"Set {scope} permission to {mode}", category="Permissions", keywords=(scope, mode, "permission"), callback=set_permission(scope, mode))
+    add(id="repository.open", title="Open Repository Explorer", subtitle="Browse project structure and AI session footprint", category="Repository", keywords=("files", "tree", "explorer"), callback=lambda app: app._open_repository_explorer())
+    add(id="repository.search", title="Focus search", subtitle="Open Repository Explorer with search focused", category="Repository", keywords=("find", "files"), callback=lambda app: app._focus_repository_search())
+    add(id="repository.changed", title="Show changed files", subtitle="Filter Repository Explorer to AI-modified files", category="Repository", keywords=("edited", "modified"), callback=lambda app: app._open_repository_badge_filter(RepositoryBadge.EDITED))
+    add(id="repository.read", title="Show read files", subtitle="Filter Repository Explorer to AI-inspected files", category="Repository", keywords=("inspected", "read"), callback=lambda app: app._open_repository_badge_filter(RepositoryBadge.READ))
+    add(id="repository.proposed", title="Show pending proposal files", subtitle="Filter Repository Explorer to pending proposal files", category="Repository", keywords=("pending", "proposal"), callback=lambda app: app._open_repository_badge_filter(RepositoryBadge.PROPOSED), enabled=has_pending)
     add(id="proposal.review", title="Review pending proposal", subtitle="Open the dedicated diff review screen", category="Proposal", keywords=("diff", "review"), callback=lambda app: app._open_review_screen(), enabled=has_pending)
     add(id="proposal.apply", title="Apply pending proposal", subtitle="Review and apply all pending changes", category="Proposal", keywords=("approve", "apply"), callback=apply_pending, enabled=has_pending)
     add(id="proposal.reject", title="Reject pending proposal", subtitle="Discard the pending proposal", category="Proposal", keywords=("deny", "reject"), callback=reject_pending, enabled=has_pending)

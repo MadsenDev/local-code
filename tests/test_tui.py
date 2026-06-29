@@ -5,6 +5,7 @@ from local_code.providers import OllamaProvider
 from local_code.tui import ConfirmScreen, LocalCodeApp
 from local_code.tui.commands import build_commands, filter_commands
 from local_code.tui.diff_review import ReviewFile, build_review_model, parse_unified_diff, summarize_review
+from local_code.tui.repository import RepositoryBadge, RepositoryTree
 
 
 def _partner(tmp_path, **kw):
@@ -351,3 +352,60 @@ def test_runtime_status_screen_data_rendering_helper():
     table = runtime_status_table(report)
     assert table.row_count == 8
     assert runtime_next_action(report) == "Run doctor or benchmark from Ctrl+K."
+
+
+def test_repository_tree_build_badges_search_selection_and_preview(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("print('hi')\nsecond\n")
+    (tmp_path / "README.md").write_text("# Hello\n")
+    tree = RepositoryTree(tmp_path)
+    tree.build()
+    tree.mark_read("README.md")
+    tree.mark_edited("src/app.py")
+    tree.assign_badges()
+    readme = tree.root.find("README.md")
+    app = tree.root.find("src/app.py")
+    assert readme is not None and RepositoryBadge.READ in readme.badges
+    assert app is not None and RepositoryBadge.EDITED in app.badges
+    assert [node.path for node in tree.visible_nodes("app") if not node.is_dir] == ["src/app.py"]
+    assert "print('hi')" in tree.preview("src/app.py", limit=1)
+
+
+def test_repository_proposal_badges_apply_and_clear(tmp_path):
+    (tmp_path / "a.py").write_text("a\n")
+    tree = RepositoryTree(tmp_path)
+    tree.build()
+    tree.ingest_report({"files_read": ["a.py"], "files_changed": ["a.py"], "needs_approval": True})
+    node = tree.root.find("a.py")
+    assert node is not None
+    assert {RepositoryBadge.READ, RepositoryBadge.EDITED, RepositoryBadge.PROPOSED} <= node.badges
+    tree.clear_proposal()
+    assert RepositoryBadge.PROPOSED not in node.badges
+    tree.set_proposed(["a.py"])
+    tree.apply_proposal()
+    assert RepositoryBadge.PROPOSED not in node.badges
+    assert tree.session["a.py"].edited_count >= 2
+
+
+def test_repository_palette_commands_and_screen_open(tmp_path):
+    async def inner():
+        (tmp_path / "README.md").write_text("# Project\n")
+        partner = _partner(tmp_path)
+        app = LocalCodeApp(partner)
+        async with app.run_test() as pilot:
+            command = next(c for c in app.commands if c.id == "repository.open")
+            app.execute_palette_command(command)
+            await pilot.pause()
+            assert app.screen_stack[-1].__class__.__name__ == "RepositoryExplorerScreen"
+            await pilot.press("escape")
+            await pilot.pause()
+
+    asyncio.run(inner())
+
+
+def test_repository_pending_command_disabled_without_proposal(tmp_path):
+    app = LocalCodeApp(_partner(tmp_path))
+    commands = build_commands()
+    assert not any(c.id == "repository.proposed" for c in filter_commands(commands, "pending", app))
+    app.partner.pending_plan = {"report": {"needs_approval": True}, "contract": {}, "original_prompt": "x"}
+    assert any(c.id == "repository.proposed" for c in filter_commands(commands, "pending", app))

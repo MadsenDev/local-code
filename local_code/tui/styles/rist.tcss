@@ -253,3 +253,63 @@ RuntimeStatusScreen, DoctorResultsScreen, BenchmarkResultsScreen {
     height: 1;
     color: #7f8b99;
 }
+
+RepositoryExplorerScreen {
+    align: center middle;
+    background: #0f141980;
+}
+
+#repo-box {
+    width: 92%;
+    height: 88%;
+    padding: 1 2;
+    background: #151d26;
+    border: round #5e81ac;
+}
+
+#repo-title {
+    height: 1;
+    color: #8fbcbb;
+    text-style: bold;
+}
+
+#repo-project {
+    height: 3;
+    border-bottom: solid #263241;
+}
+
+#repo-search {
+    height: 3;
+    margin: 1 0;
+    border: tall #263241;
+    background: #111820;
+}
+
+#repo-main { height: 1fr; }
+
+#repo-tree {
+    width: 42%;
+    min-width: 32;
+    padding: 1;
+    border-right: solid #263241;
+    overflow: auto;
+}
+
+#repo-side { width: 1fr; }
+
+#repo-details {
+    height: 10;
+    padding: 1 2;
+    border-bottom: solid #263241;
+}
+
+#repo-preview {
+    height: 1fr;
+    padding: 1 2;
+    overflow: auto;
+}
+
+#repo-hint {
+    height: 1;
+    color: #7f8b99;
+}
