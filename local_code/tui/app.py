@@ -1,67 +1,23 @@
-"""Full-screen Textual TUI for Rist.
-
-This is the default interactive experience. It drives the same `LocalPartner`
-as the plain REPL, but renders the conversation, live token streaming, tool
-activity, and edit/command approvals in a full-screen app.
-
-The model work runs in a background thread (`@work(thread=True)`) so the UI
-stays responsive; the partner pushes progress back through three bridges set up
-in `_run_turn`: `on_token` (streaming text), `observer` (tool/milestone events),
-and `confirm_hook` (a modal approval prompt). All cross-thread UI updates go
-through `call_from_thread`.
-
-Imported lazily by the CLI, so Textual is only required when the TUI runs.
-"""
+"""Rist TUI v2 Textual application."""
 
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
-
 from textual import work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
-from textual.screen import ModalScreen
-from textual.widgets import Button, Footer, Input, Label, RichLog, Static
+from textual.widgets import Footer, Input, Label, Static
 
-from .hardware import detect_hardware
-from .routing import resolve_model_routing
+from local_code.hardware import detect_hardware
+from local_code.routing import resolve_model_routing
 
-
-class ConfirmScreen(ModalScreen[bool]):
-    """Modal approval prompt used for edit/command confirmations."""
-
-    BINDINGS = [
-        Binding("y", "approve", "Approve"),
-        Binding("n", "deny", "Deny"),
-        Binding("escape", "deny", "Deny"),
-    ]
-
-    def __init__(self, kind, label, content):
-        super().__init__()
-        self._kind = kind
-        self._label = label
-        self._content = content
-
-    def compose(self) -> ComposeResult:
-        with Vertical(id="confirm-box"):
-            yield Label(f"Approve {self._kind.lower()}?", id="confirm-title")
-            yield Static(Text(self._label, style="bold"), id="confirm-label")
-            if self._content:
-                yield Static(Text(self._content, style="dim"), id="confirm-content")
-            with Horizontal(id="confirm-buttons"):
-                yield Button("Approve (y)", variant="success", id="yes")
-                yield Button("Deny (n)", variant="error", id="no")
-
-    def on_button_pressed(self, event: Button.Pressed) -> None:
-        self.dismiss(event.button.id == "yes")
-
-    def action_approve(self) -> None:
-        self.dismiss(True)
-
-    def action_deny(self) -> None:
-        self.dismiss(False)
-
+from .screens.confirm import ConfirmScreen
+from .widgets.activity import ActivityTimeline
+from .widgets.conversation import ConversationView
+from .widgets.input import InputBar
+from .widgets.runtime import RuntimePanel
+from .widgets.status import StatusBar, render_status_text
 
 HELP = """\
 **Commands**
@@ -77,20 +33,9 @@ HELP = """\
 
 
 class LocalCodeApp(App):
-    CSS = """
-    Screen { layout: vertical; }
-    #status { height: 1; padding: 0 1; background: $panel; color: $text-muted; }
-    #log { height: 1fr; padding: 0 1; }
-    #live { padding: 0 1; color: $text; }
-    #live.empty { display: none; }
-    #input { border: tall $accent; }
-    ConfirmScreen { align: center middle; }
-    #confirm-box { width: 80; height: auto; padding: 1 2; border: thick $warning; background: $surface; }
-    #confirm-title { text-style: bold; color: $warning; }
-    #confirm-label { margin: 1 0; }
-    #confirm-buttons { height: auto; align: center middle; }
-    #confirm-buttons Button { margin: 1 2; }
-    """
+    """Purpose-built Rist cockpit preserving the existing agent behavior."""
+
+    CSS_PATH = "styles/rist.tcss"
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", priority=True),
@@ -104,43 +49,60 @@ class LocalCodeApp(App):
         self._live_text = ""
         self._busy = False
 
-    # -- layout ---------------------------------------------------------
     def compose(self) -> ComposeResult:
-        yield Static(self._status_text(), id="status")
-        yield RichLog(id="log", wrap=True, markup=True, highlight=False)
-        yield Static("", id="live", classes="empty")
-        yield Input(placeholder="Ask, or /help …", id="input")
+        with Horizontal(id="topbar"):
+            yield Label("Rist", id="brand")
+            yield StatusBar(id="status")
+        with Horizontal(id="workspace"):
+            yield ConversationView(id="conversation")
+            yield ActivityTimeline(id="activity")
+        with Vertical(id="confidence-strip"):
+            yield RuntimePanel(id="runtime-panel")
+        yield InputBar()
         yield Footer()
+
+    @property
+    def conversation(self) -> ConversationView:
+        return self.query_one(ConversationView)
+
+    @property
+    def activity(self) -> ActivityTimeline:
+        return self.query_one(ActivityTimeline)
+
+    @property
+    def status(self) -> StatusBar:
+        return self.query_one(StatusBar)
+
+    @property
+    def runtime_panel(self) -> RuntimePanel:
+        return self.query_one(RuntimePanel)
+
+    @property
+    def input(self) -> Input:
+        return self.query_one("#input", Input)
 
     def on_mount(self) -> None:
         self.title = "Rist"
-        log = self.query_one("#log", RichLog)
-        log.write(Panel(Markdown(f"Welcome to **Rist**. Mode: `{self.partner.mode}`. Type `/help` for commands."), border_style="cyan"))
-        self.query_one("#input", Input).focus()
+        self.conversation.write_welcome(self.partner.mode)
+        self._refresh_status()
+        self.input.focus()
 
-    # -- status bar -----------------------------------------------------
     def _status_text(self) -> str:
-        p = self.partner
-        models = p.frontend_model if p.frontend_model == p.backend_model else f"{p.frontend_model} → {p.backend_model}"
-        return (
-            f"[b]{p.provider.name}[/b]  ·  {models}  ·  mode {p.mode}  ·  "
-            f"routing {p.routing_decision.get('mode', p.model_routing)}  ·  edits {p.edit_permission}/cmds {p.command_permission}"
-            + ("  ·  [yellow]proposal pending — type 'yes'[/]" if p.pending_plan else "")
-        )
+        return render_status_text(self.partner, self._busy)
 
     def _refresh_status(self) -> None:
-        self.query_one("#status", Static).update(self._status_text())
+        self.status.refresh_from(self.partner, self._busy)
+        self.runtime_panel.refresh_from(self.partner)
 
-    # -- input handling -------------------------------------------------
     def on_input_submitted(self, event: Input.Submitted) -> None:
         text = event.value.strip()
-        self.query_one("#input", Input).value = ""
+        self.input.value = ""
         if not text or self._busy:
             return
         if text.startswith("/"):
             if self._handle_command(text):
                 return
-        self._write_user(text)
+        self.conversation.write_user(text)
         self._run_turn(text, kind="chat")
 
     def _handle_command(self, text) -> bool:
@@ -152,16 +114,16 @@ class LocalCodeApp(App):
             self.exit()
             return True
         if cmd == "/help":
-            self.query_one("#log", RichLog).write(Panel(Markdown(HELP), title="help", border_style="cyan"))
+            self.conversation.log.write(Panel(Markdown(HELP), title="help", border_style="cyan"))
             return True
         if cmd == "/clear":
             self.partner.history.clear()
             self.partner.pending_plan = None
-            self.query_one("#log", RichLog).clear()
+            self.conversation.clear()
             self._refresh_status()
             return True
         if cmd == "/status":
-            self.query_one("#log", RichLog).write(Panel(Markdown(self._status_text()), title="status", border_style="cyan"))
+            self.conversation.log.write(Panel(Markdown(self._status_text()), title="status", border_style="cyan"))
             return True
         if cmd == "/models":
             self._write_models()
@@ -169,9 +131,9 @@ class LocalCodeApp(App):
         if cmd == "/decisions":
             try:
                 result = self.partner.run_decision_command("decisions " + arg)
-                self.query_one("#log", RichLog).write(Panel(Text(result), title="decisions", border_style="cyan"))
+                self.conversation.log.write(Panel(Text(result), title="decisions", border_style="cyan"))
             except (KeyError, ValueError) as exc:
-                self.query_one("#log", RichLog).write(Text(str(exc), style="yellow"))
+                self.conversation.log.write(Text(str(exc), style="yellow"))
             return True
         if cmd == "/context":
             usage = self.partner.context_usage()
@@ -183,7 +145,7 @@ class LocalCodeApp(App):
                 f"Other: {usage.other:,}",
                 f"Total: {usage.total:,} / {usage.limit:,} ({usage.percent}%)",
             ])
-            self.query_one("#log", RichLog).write(Panel(Text(body), title="context", border_style="cyan"))
+            self.conversation.log.write(Panel(Text(body), title="context", border_style="cyan"))
             return True
         if cmd == "/routing" and arg in {"single", "adaptive", "dual"}:
             p = self.partner
@@ -193,7 +155,7 @@ class LocalCodeApp(App):
             )
             p.model_routing, p.frontend_model, p.backend_model, p.routing_decision = arg, front, back, decision
             p.sync_executor()
-            self.query_one("#log", RichLog).write(Text(f"Model routing: {decision['mode']} — {decision['reason']}", style="cyan"))
+            self.conversation.log.write(Text(f"Model routing: {decision['mode']} — {decision['reason']}", style="cyan"))
             self._refresh_status()
             return True
         if cmd == "/mode" and arg in {"chat", "hybrid", "agent"}:
@@ -211,32 +173,32 @@ class LocalCodeApp(App):
             return True
         if cmd == "/apply":
             if not self.partner.pending_plan:
-                self.query_one("#log", RichLog).write(Text("No pending proposal to apply.", style="yellow"))
+                self.conversation.log.write(Text("No pending proposal to apply.", style="yellow"))
                 return True
-            self._write_user("/apply")
+            self.conversation.write_user("/apply")
             self._run_turn("", kind="apply")
             return True
         if cmd == "/ask" and arg:
-            self._write_user(arg)
+            self.conversation.write_user(arg)
             self._run_turn(arg, kind="ask")
             return True
         if cmd == "/plan" and arg:
-            self._write_user(arg)
+            self.conversation.write_user(arg)
             self._run_turn(arg, kind="plan")
             return True
         if cmd in {"/agent", "/code"} and arg:
-            self._write_user(arg)
+            self.conversation.write_user(arg)
             self._run_turn(arg, kind="agent")
             return True
         if cmd == "/copy":
             self._copy_last_response()
             return True
-        self.query_one("#log", RichLog).write(Text(f"Unknown or incomplete command: {text}", style="yellow"))
+        self.conversation.log.write(Text(f"Unknown or incomplete command: {text}", style="yellow"))
         return True
 
     def _copy_last_response(self) -> None:
         import subprocess as _sp
-        log = self.query_one("#log", RichLog)
+        log = self.conversation.log
         history = self.partner.history
         last = next((m["content"] for m in reversed(history) if m["role"] == "assistant"), None)
         if not last:
@@ -254,7 +216,7 @@ class LocalCodeApp(App):
     def _write_models(self) -> None:
         p = self.partner
         if p.provider.is_local:
-            from .model_profiles import advisory_lines, RECOMMENDED_CEILING, RECOMMENDED_STANDARD
+            from local_code.model_profiles import advisory_lines, RECOMMENDED_CEILING, RECOMMENDED_STANDARD
 
             lines = advisory_lines(p.frontend_model, p.backend_model)
             lines.append("")
@@ -262,34 +224,18 @@ class LocalCodeApp(App):
             body = "\n".join(lines)
         else:
             body = f"Provider: {p.provider.describe()}\nModels: {p.frontend_model}, {p.backend_model}\nCloud models — local VRAM tiers don't apply."
-        self.query_one("#log", RichLog).write(Panel(Text(body), title="models", border_style="cyan"))
+        self.conversation.log.write(Panel(Text(body), title="models", border_style="cyan"))
 
     # -- transcript helpers (main thread only) --------------------------
     def _write_user(self, text) -> None:
-        self.query_one("#log", RichLog).write(Panel(Text(text), title="you", title_align="left", border_style="cyan"))
+        self.conversation.write_user(text)
 
     def _append_live(self, chunk) -> None:
         self._live_text += chunk
-        live = self.query_one("#live", Static)
-        live.remove_class("empty")
-        live.update(Text(self._live_text))
-        self.query_one("#log", RichLog).scroll_end(animate=False)
+        self.conversation.update_live(self._live_text)
 
     def _write_event(self, event) -> None:
-        kind = event.get("kind")
-        log = self.query_one("#log", RichLog)
-        if kind == "tool":
-            log.write(Text(f"  ⚙ {event.get('line', event.get('tool', ''))}", style="blue"))
-        elif kind == "milestone":
-            log.write(Text(f"  • {event.get('text', '')}", style="dim"))
-        elif kind == "transcript":
-            title = event.get("title", "")
-            log.write(Text(f"  ✓ {title}", style="green"))
-            for line in event.get("lines", []):
-                log.write(Text(f"      {line}", style="dim"))
-        elif kind == "trace":
-            log.write(Text(f"  · {event.get('text', '')}", style="dim"))
-        log.scroll_end(animate=False)
+        self.activity.write_event(event)
 
     def _confirm_result(self, kind, label, content) -> bool:
         # Called via call_from_thread; runs the modal and waits for dismissal.
@@ -299,9 +245,9 @@ class LocalCodeApp(App):
     def _run_turn(self, text, kind) -> None:
         self._busy = True
         self._live_text = ""
-        inp = self.query_one("#input", Input)
+        inp = self.input
         inp.disabled = True
-        self.query_one("#status", Static).update("[b]working…[/]  " + self._status_text())
+        self.status.update("[b]working…[/]  " + self._status_text())
 
         partner = self.partner
         partner.on_token = lambda chunk: self.call_from_thread(self._append_live, chunk)
@@ -336,22 +282,22 @@ class LocalCodeApp(App):
 
     def _finish_turn(self, reply, error) -> None:
         # Clear the live streaming pane and commit the final reply to the log.
-        live = self.query_one("#live", Static)
+        live = self.conversation.query_one("#live", Static)
         live.update("")
         live.add_class("empty")
         self._live_text = ""
-        log = self.query_one("#log", RichLog)
+        log = self.conversation.log
         if error is not None:
-            log.write(Panel(Text(error, style="red"), title="error", border_style="red"))
+            self.conversation.write_tool_summary(Text(error, style="red"), title="error", style="red")
         elif reply:
-            log.write(Panel(Markdown(reply), title="Rist", title_align="left", border_style="green"))
+            self.conversation.write_assistant(reply)
         self._write_report_extras()
         log.scroll_end(animate=False)
         self.partner.on_token = None
         self.partner.observer = None
         self.partner.confirm_hook = None
         self._busy = False
-        inp = self.query_one("#input", Input)
+        inp = self.input
         inp.disabled = False
         inp.focus()
         self._refresh_status()
@@ -360,7 +306,7 @@ class LocalCodeApp(App):
         report = getattr(self.partner, "last_report", None)
         if not report:
             return
-        log = self.query_one("#log", RichLog)
+        log = self.conversation.log
         if report.get("needs_approval"):
             plan = [s for s in (report.get("plan") or []) if s]
             if plan:
@@ -377,16 +323,17 @@ class LocalCodeApp(App):
         if report.get("commands_run"):
             bits.append(f"{len(report['commands_run'])} cmds")
         if bits:
-            log.write(Text("  " + " · ".join(bits), style="dim"))
+            self.activity.write_note(" · ".join(bits), title="REPORT", style="bright_black")
 
     # -- actions --------------------------------------------------------
     def action_clear_log(self) -> None:
-        self.query_one("#log", RichLog).clear()
+        self.conversation.clear()
+        self.activity.clear()
 
     def action_cancel_turn(self) -> None:
         if self._busy:
             self.partner.executor.cancel_event.set()
-            self.query_one("#log", RichLog).write(Text("Cancelling…", style="yellow"))
+            self.conversation.log.write(Text("Cancelling…", style="yellow"))
 
 
 def run_tui(partner) -> int:
