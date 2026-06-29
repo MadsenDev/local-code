@@ -76,7 +76,7 @@ accept `ollama=` for backward compatibility (it builds an `OllamaProvider`), and
 the agent calls go through `self.provider.*`, so `provider.is_local` gates the
 local-only behaviors (VRAM tiering, few-shot).
 
-### TUI (`tui.py`)
+### TUI (`tui/`)
 
 The default interactive experience is a full-screen Textual app (`LocalCodeApp`)
 launched by `cli.main()` when stdout is a TTY and Textual is importable; it falls
@@ -141,7 +141,7 @@ Per-repo memory has an explicit boundary: `.rist/project/` contains reviewed, op
 | `local_code/models.py` | Ollama HTTP client + reliability layer (structured output, retries, `keep_alive`, capability probes) |
 | `local_code/providers.py` | Provider abstraction: `OllamaProvider` + `OpenAICompatibleProvider` (OpenRouter/OpenAI/…) |
 | `local_code/model_profiles.py` | Model capability tiers + recommended-minimum standard (3060 12 GB target) |
-| `local_code/tui.py` | Full-screen Textual TUI (`LocalCodeApp`), the default interactive experience |
+| `local_code/tui/` | Modular full-screen Textual TUI (`LocalCodeApp`), widgets, screens, and Rist styles |
 | `local_code/eval.py` | Tool-loop reliability eval harness (`python -m local_code.eval`) |
 | `local_code/config.py` | All defaults, limits, regex patterns, blocked commands |
 | `local_code/cli.py` | REPL, slash commands, at-references, paste handling |

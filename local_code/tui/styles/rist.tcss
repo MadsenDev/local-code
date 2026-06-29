@@ -1,0 +1,134 @@
+/* Rist TUI v2 identity */
+Screen {
+    layout: vertical;
+    background: #0f1419;
+    color: #d8dee9;
+}
+
+#topbar {
+    height: 3;
+    padding: 0 1;
+    background: #121a22;
+    border-bottom: solid #263241;
+    layout: horizontal;
+}
+
+#brand {
+    width: 1fr;
+    content-align: left middle;
+    text-style: bold;
+    color: #8fbcbb;
+}
+
+#status {
+    width: auto;
+    min-width: 70;
+    content-align: right middle;
+    color: #a7b0bd;
+}
+
+#workspace {
+    height: 1fr;
+    layout: horizontal;
+    padding: 1 1 0 1;
+}
+
+#conversation {
+    width: 2fr;
+    min-width: 50;
+    padding-right: 1;
+}
+
+#activity {
+    width: 1fr;
+    max-width: 48;
+    min-width: 28;
+    border-left: solid #263241;
+    padding-left: 1;
+}
+
+.panel-title {
+    height: 1;
+    color: #8fbcbb;
+    text-style: bold;
+}
+
+#log, #activity-log {
+    height: 1fr;
+    background: #0f1419;
+}
+
+#activity-log {
+    scrollbar-size: 1 1;
+}
+
+#live {
+    padding: 0 1;
+    margin-top: 1;
+    border-left: thick #8fbcbb;
+    color: #d8dee9;
+    max-height: 8;
+}
+
+#live.empty {
+    display: none;
+}
+
+#confidence-strip {
+    height: 8;
+    border-top: solid #263241;
+    border-bottom: solid #263241;
+    padding: 0 1;
+}
+
+#runtime-panel {
+    height: 100%;
+    color: #c7d0dc;
+}
+
+#input {
+    height: 3;
+    margin: 0 1;
+    border: tall #5e81ac;
+    background: #111820;
+}
+
+Footer {
+    background: #121a22;
+    color: #7f8b99;
+}
+
+ConfirmScreen {
+    align: center middle;
+}
+
+#confirm-box {
+    width: 80;
+    height: auto;
+    padding: 1 2;
+    border: thick #d08770;
+    background: #151d26;
+}
+
+#confirm-title {
+    text-style: bold;
+    color: #ebcb8b;
+}
+
+#confirm-label {
+    margin: 1 0;
+}
+
+#confirm-content {
+    max-height: 18;
+    overflow-y: auto;
+}
+
+#confirm-buttons {
+    height: auto;
+    align: center middle;
+}
+
+#confirm-buttons Button {
+    margin: 1 2;
+}
