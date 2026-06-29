@@ -171,3 +171,71 @@ def test_decisions_cli_add_list_accept(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["rist", "decisions", "list", "--workdir", str(tmp_path), "--storage-mode", "local-only"])
     assert cli.main() == 0
     assert f"{decision_id}  [accepted]  Use SQLite" in capsys.readouterr().out
+
+
+def test_setup_writes_config_and_registers_model(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "qwen.gguf"
+    model.write_bytes(b"gguf")
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys, "argv", ["rist", "setup", "--model-path", str(model), "--profile", "qwen2.5-coder-7b", "--gpu", "cpu", "--llama-server", "/nope"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "Saved config" in out
+    assert "Registered model" in out
+    config = cli.load_runtime_config()
+    assert config["provider"] == "auto"
+    assert config["default_runtime"] == "llamacpp"
+    assert config["llamacpp"]["profile"] == "qwen2.5-coder-7b"
+    assert any(m["id"] == "qwen2.5-coder-7b-llamacpp" and m["exists"] for m in cli.list_managed_models())
+
+
+def test_setup_start_calls_managed_start(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "qwen.gguf"
+    model.write_bytes(b"gguf")
+    server = tmp_path / "llama-server"
+    server.write_text("#!/bin/sh\n", encoding="utf-8")
+    server.chmod(0o755)
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    calls = []
+    monkeypatch.setattr(cli, "start_server", lambda profile, gpu, **kwargs: calls.append((profile, gpu, kwargs)) or {"state": "ready", "managed": True, "base_url": "http://127.0.0.1:8080/v1"})
+    monkeypatch.setattr(sys, "argv", ["rist", "setup", "--model-path", str(model), "--start", "--llama-server", str(server), "--gpu", "cpu"])
+    assert cli.main() == 0
+    assert calls and calls[0][0] == "qwen2.5-coder-7b"
+    assert calls[0][2]["executable"] == str(server.resolve())
+
+
+def test_auto_provider_order_managed_external_ollama(monkeypatch):
+    args = cli.parse_args.__globals__["argparse"].Namespace(base_url=None, api_key=None, ollama="http://ollama", llama_server=None, gpu=None, host="127.0.0.1", port=8080, wait_timeout=1)
+    monkeypatch.setattr(cli, "load_runtime_config", lambda: {"provider": "auto", "default_runtime": "llamacpp", "llamacpp": {"base_url": "http://llama", "profile": "qwen2.5-coder-7b"}})
+    monkeypatch.setattr(cli, "server_status", lambda: {"managed": True, "state": "running", "health": {"ready": True}, "base_url": "http://managed"})
+    assert cli._select_auto_provider(args) == ("llamacpp", "http://managed")
+
+    monkeypatch.setattr(cli, "server_status", lambda: {"managed": False, "state": "stopped"})
+    monkeypatch.setattr(cli, "_try_autostart_managed_llamacpp", lambda *a: None)
+    class P:
+        def __init__(self, ok): self.ok = ok
+        def available(self): return self.ok
+    monkeypatch.setattr(cli, "build_provider", lambda name, **kwargs: P(name == "llamacpp"))
+    assert cli._select_auto_provider(args) == ("llamacpp", "http://llama")
+    monkeypatch.setattr(cli, "build_provider", lambda name, **kwargs: P(name == "ollama"))
+    assert cli._select_auto_provider(args) == ("ollama", "http://ollama")
+
+
+def test_plain_rist_autostarts_when_config_and_model_ready(monkeypatch):
+    args = cli.parse_args.__globals__["argparse"].Namespace(base_url=None, api_key=None, ollama="http://ollama", llama_server=None, gpu=None, host="127.0.0.1", port=8080, wait_timeout=1)
+    monkeypatch.setattr(cli, "load_runtime_config", lambda: {"default_runtime": "llamacpp", "llamacpp": {"profile": "qwen2.5-coder-7b", "gpu_profile": "cpu", "llama_server": "/bin/llama-server"}})
+    monkeypatch.setattr(cli, "list_managed_models", lambda: [{"id": "qwen2.5-coder-7b-llamacpp", "exists": True}])
+    monkeypatch.setattr(cli, "find_llama_server", lambda explicit=None: explicit)
+    calls = []
+    monkeypatch.setattr(cli, "start_server", lambda profile, gpu, **kwargs: calls.append((profile, gpu, kwargs)) or {"health": {"ready": True}, "base_url": "http://started/v1"})
+    started = cli._try_autostart_managed_llamacpp(args, cli.load_runtime_config())
+    assert started["base_url"] == "http://started/v1"
+    assert calls[0][0] == "qwen2.5-coder-7b"
+
+
+def test_llama_tune_honestly_reports_conservative_only(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["rist", "llama", "tune", "--gpu", "cpu"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out.lower()
+    assert "no measured tuning was run" in out
+    assert "conservative" in out
