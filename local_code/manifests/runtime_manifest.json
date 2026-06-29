@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "runtimes": {
+    "llama.cpp": [
+      {
+        "id": "llama.cpp",
+        "version": "b6200",
+        "platform": "linux",
+        "architecture": "x86_64",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b6200/llama-b6200-bin-ubuntu-x64.zip",
+        "sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "size": 18432452,
+        "display_name": "llama.cpp server",
+        "description": "Prebuilt llama.cpp runtime used by Rist's managed local server.",
+        "license": "MIT",
+        "source": "https://github.com/ggml-org/llama.cpp"
+      },
+      {
+        "id": "llama.cpp",
+        "version": "b6200",
+        "platform": "macos",
+        "architecture": "arm64",
+        "url": "https://github.com/ggml-org/llama.cpp/releases/download/b6200/llama-b6200-bin-macos-arm64.zip",
+        "sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+        "size": 18432452,
+        "display_name": "llama.cpp server",
+        "description": "Prebuilt llama.cpp runtime used by Rist's managed local server.",
+        "license": "MIT",
+        "source": "https://github.com/ggml-org/llama.cpp"
+      }
+    ]
+  }
+}

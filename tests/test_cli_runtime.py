@@ -309,3 +309,20 @@ def test_setup_start_failure_prints_doctor(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["rist", "setup"])
     assert cli.main() == 0
     assert "Startup failed: boom" in capsys.readouterr().out
+
+def test_runtime_install_uses_manifest_without_explicit_url(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["rist", "runtime", "install"])
+    calls = []
+    monkeypatch.setattr(cli, "install_llama_server", lambda url=None, **kwargs: calls.append((url, kwargs)) or {"executable": "/rist/runtime/llama-server", "sha256": "a" * 64})
+    assert cli.main() == 0
+    assert calls[0][0] is None
+    assert "Installed llama-server" in capsys.readouterr().out
+
+
+def test_model_install_uses_manifest_without_explicit_url(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "argv", ["rist", "model", "install", "qwen2.5-coder-7b"])
+    calls = []
+    monkeypatch.setattr(cli, "install_model", lambda target, url=None, **kwargs: calls.append((target, url, kwargs)) or {"profile": "qwen2.5-coder-7b-llamacpp", "path": "/rist/models/qwen.gguf", "bytes": 1, "sha256": "b" * 64})
+    assert cli.main() == 0
+    assert calls[0][1] is None
+    assert "managed manifest" in capsys.readouterr().out

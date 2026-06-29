@@ -44,6 +44,7 @@ from .llama_runtime import (
     start_server,
     stop_server,
 )
+from .managed_manifest import select_asset
 from .diagnostics import benchmark_model, doctor_report, format_benchmark, format_doctor, to_json
 from .hardware import detect_hardware
 from .routing import resolve_model_routing
@@ -80,11 +81,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Rist - local-first AI coding agent for real developer hardware."
     )
-    parser.add_argument("command", nargs="?", choices=["chat", "setup", "doctor", "benchmark", "bench", "llama", "model", "index", "decisions"], help="Run diagnostics, benchmark, or llama.cpp helpers")
+    parser.add_argument("command", nargs="?", choices=["chat", "setup", "doctor", "benchmark", "bench", "llama", "model", "runtime", "index", "decisions"], help="Run diagnostics, benchmark, or llama.cpp helpers")
     parser.add_argument(
         "llama_action",
         nargs="?",
-        choices=["doctor", "command", "install", "tune", "start", "stop", "status", "restart", "list", "register", "logs", "remove", "add", "accept", "supersede", "review", "reject", "merge"],
+        choices=["doctor", "command", "install", "update", "uninstall", "tune", "start", "stop", "status", "restart", "list", "register", "logs", "remove", "add", "accept", "supersede", "review", "reject", "merge"],
         help="llama.cpp or managed-model action",
     )
     parser.add_argument("model_target", nargs="?", help="Managed model profile, e.g. qwen36")
@@ -963,20 +964,34 @@ def _print_dry_run(report, json_output=False):
 
 def _handle_runtime_command(args):
     action = args.llama_action
-    if args.command == "llama" and action == "install":
-        if not args.url:
-            raise ValueError("`rist llama install` requires --url for a prebuilt llama-server binary.")
-        report = install_llama_server(args.url, destination=args.destination, sha256=args.sha256, force=args.force)
+    if args.command in {"llama", "runtime"} and action in {"install", "update"}:
+        if args.command == "llama" and not args.url:
+            raise ValueError("`rist llama install` requires --url. Use `rist runtime install` for the managed manifest runtime.")
+        report = install_llama_server(args.url, destination=args.destination, sha256=args.sha256, force=args.force or action == "update")
         if args.json_output:
             print(to_json(report))
         else:
             print(f"Installed llama-server: {report['executable']}")
             print(f"SHA-256: {report['sha256']}")
         return 0
-    if args.command == "llama" and action == "logs":
+    if args.command in {"llama", "runtime"} and action == "logs":
         return _show_managed_logs(args.tail, args.follow)
     if args.command == "llama" and action == "tune":
         return _run_llama_tune(args)
+    if args.command == "runtime":
+        if action == "status":
+            _print_runtime_report(server_status(), args.json_output)
+            return 0
+        if action == "uninstall":
+            stop_server()
+            executable = find_llama_server(args.llama_server)
+            if executable and "runtime" in executable:
+                Path(executable).unlink(missing_ok=True)
+                print(f"Removed managed runtime: {executable}")
+            else:
+                print("No managed runtime executable was found.")
+            return 0
+        raise ValueError("Runtime action must be one of: install, update, uninstall, status, logs.")
     if args.command != "model":
         return None
     if action == "list":
@@ -1005,13 +1020,15 @@ def _handle_runtime_command(args):
     if not target:
         raise ValueError(f"`rist model {action or 'ACTION'}` requires a profile, e.g. qwen2.5-coder-7b.")
     if action == "install":
-        if not args.url:
-            raise ValueError("Model installation requires an explicit --url to a GGUF file; Hugging Face authentication is not managed yet.")
         if not args.json_output:
             profile = get_llamacpp_profile(target)
             hardware = profile["hardware"]
             print(f"Installing {profile['name']}...")
-            print(f"Source: {args.url}")
+            if args.url:
+                print(f"Source: {args.url}")
+            else:
+                asset = select_asset("model", target)
+                print(f"Source: managed manifest ({asset['display_name']})")
             print(f"Recommended RAM: {hardware['recommended_ram_gb']} GB (ideal {hardware['ideal_ram_gb']} GB)")
             print(f"Recommended VRAM: {hardware['recommended_vram_gb']} GB")
         report = install_model(target, args.url, filename=args.filename, sha256=args.sha256, force=args.force)
@@ -1455,7 +1472,7 @@ def main():
         )
         print(to_json(report) if args.json_output else format_index_report(report))
         return 0
-    if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs", "tune"}):
+    if args.command in {"model", "runtime"} or (args.command == "llama" and args.llama_action in {"install", "logs", "tune"}):
         try:
             return _handle_runtime_command(args)
         except ValueError as exc:

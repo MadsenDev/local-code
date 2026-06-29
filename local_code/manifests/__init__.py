@@ -1,0 +1,1 @@
+"""Bundled managed download manifests."""

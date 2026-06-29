@@ -18,11 +18,14 @@ import subprocess
 import time
 import urllib.parse
 import urllib.request
+import zipfile
+import tarfile
 from collections import deque
 from pathlib import Path
 
 from .llamacpp import DEFAULT_LLAMACPP_BASE_URL, generate_llama_server_args, get_llamacpp_profile
 from .paths import migrate_registry_location, rist_home
+from .managed_manifest import select_asset
 
 
 def local_code_home() -> Path:
@@ -31,11 +34,29 @@ def local_code_home() -> Path:
 
 
 def runtime_dir() -> Path:
-    return local_code_home() / "runtimes" / "llamacpp"
+    return local_code_home() / "runtime" / "llamacpp"
+
+
+def downloads_dir() -> Path:
+    return local_code_home() / "downloads"
+
+
+def cache_dir() -> Path:
+    return local_code_home() / "cache"
+
+
+def logs_dir() -> Path:
+    return local_code_home() / "logs"
+
+
+def config_dir() -> Path:
+    return local_code_home() / "config"
 
 
 def log_path() -> Path:
-    return runtime_dir() / "server.log"
+    current = runtime_dir() / "server.log"
+    legacy = local_code_home() / "runtimes" / "llamacpp" / "server.log"
+    return legacy if legacy.exists() and not current.exists() else current
 
 
 def models_dir() -> Path:
@@ -61,6 +82,7 @@ def find_llama_server(explicit: str | None = None) -> str | None:
             candidates.append(path_hit)
     candidates.extend([
         str(runtime_dir() / "bin" / "llama-server"),
+        str(local_code_home() / "runtimes" / "llamacpp" / "bin" / "llama-server"),
         str(local_code_home() / "bin" / "llama-server"),
     ])
     for candidate in candidates:
@@ -104,12 +126,50 @@ def _download(url: str, destination: Path, *, sha256: str | None = None, force=F
         raise
 
 
-def install_llama_server(url: str, *, destination: str | None = None, sha256: str | None = None, force=False):
-    """Download a prebuilt llama-server binary selected by the user."""
-    target = Path(destination).expanduser() if destination else runtime_dir() / "bin" / "llama-server"
-    report = _download(url, target, sha256=sha256, force=force)
+def _extract_llama_server(archive: Path, target: Path) -> None:
+    names = []
+    if zipfile.is_zipfile(archive):
+        with zipfile.ZipFile(archive) as zf:
+            names = zf.namelist()
+            member = next((name for name in names if Path(name).name in {"llama-server", "llama-server.exe"}), None)
+            if member:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with zf.open(member) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                return
+    if tarfile.is_tarfile(archive):
+        with tarfile.open(archive) as tf:
+            names = tf.getnames()
+            member = next((m for m in tf.getmembers() if Path(m.name).name in {"llama-server", "llama-server.exe"} and m.isfile()), None)
+            if member:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                src = tf.extractfile(member)
+                if src is None:
+                    raise FileNotFoundError("llama-server was not readable in the runtime archive.")
+                with src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                return
+    raise FileNotFoundError("The runtime archive did not contain llama-server.")
+
+
+def install_llama_server(url: str | None = None, *, destination: str | None = None, sha256: str | None = None, force=False, manifest_id="llama.cpp"):
+    """Download a manifest-approved prebuilt llama-server binary."""
+    asset = None
+    if url is None:
+        asset = select_asset("runtime", manifest_id)
+        url = asset["url"]
+        sha256 = asset["sha256"]
+    target = Path(destination).expanduser() if destination else runtime_dir() / "bin" / ("llama-server.exe" if os.name == "nt" else "llama-server")
+    archive_suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if archive_suffix in {".zip", ".gz", ".tgz", ".tar"}:
+        archive = downloads_dir() / "runtime" / Path(urllib.parse.urlparse(url).path).name
+        report = _download(url, archive, sha256=sha256, force=force)
+        _extract_llama_server(archive, target)
+        report["archive"] = str(archive.resolve())
+    else:
+        report = _download(url, target, sha256=sha256, force=force)
     target.chmod(target.stat().st_mode | 0o755)
-    report["executable"] = str(target.resolve())
+    report.update({"executable": str(target.resolve()), "manifest": asset})
     return report
 
 
@@ -134,10 +194,15 @@ def model_key(profile_id: str) -> str:
     return profile["id"]
 
 
-def install_model(profile_id: str, url: str, *, filename: str | None = None, sha256: str | None = None, force=False):
-    """Download and register a GGUF selected by profile and explicit URL."""
+def install_model(profile_id: str, url: str | None = None, *, filename: str | None = None, sha256: str | None = None, force=False):
+    """Download and register a manifest-approved model, or an advanced explicit URL with SHA-256."""
+    asset = None
+    if url is None:
+        asset = select_asset("model", profile_id)
+        url = asset["url"]
+        sha256 = asset["sha256"]
     if not sha256:
-        raise ValueError("Model installation from URL requires --sha256 to verify the GGUF.")
+        raise ValueError("Model download could not be verified because no SHA-256 was provided.")
     profile = get_llamacpp_profile(profile_id)
     name = filename or Path(urllib.parse.urlparse(url).path).name
     if filename and Path(filename).name != filename:
@@ -155,10 +220,12 @@ def install_model(profile_id: str, url: str, *, filename: str | None = None, sha
         "path": str(target.resolve()),
         "source_url": url,
         "sha256": report["sha256"],
+        "manifest": asset,
         "installed_at": int(time.time()),
     }
     _save_registry(registry)
     report["profile"] = profile["id"]
+    report["manifest"] = asset
     return report
 
 
@@ -264,7 +331,7 @@ def prepare_server_start(
     if not binary:
         raise FileNotFoundError(
             "llama-server was not found. Install llama.cpp separately, set LLAMA_SERVER, pass --llama-server, "
-            "or run `rist llama install --url URL` for a prebuilt binary."
+            "or run `rist runtime install` to install the managed runtime."
         )
     path = resolve_model_path(profile_id, model_path)
     if Path(path).suffix.lower() != ".gguf":
@@ -295,8 +362,8 @@ def resolve_model_path(profile_id: str, explicit: str | None = None) -> str:
         path = Path(entry.get("path", "")) if entry.get("path") else None
     if not path or not path.is_file():
         raise FileNotFoundError(
-            f"No installed GGUF for {profile_id!r}. Run `rist model install {profile_id} --url URL`, "
-            "or pass --model-path /path/to/model.gguf."
+            f"No installed managed model for {profile_id!r}. Run `rist model install {profile_id}`, "
+            "or use Advanced Setup with --model-path."
         )
     return str(path.resolve())
 
