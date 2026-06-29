@@ -12,9 +12,10 @@ defaults to `provider=auto`: Rist first tries a configured managed [llama.cpp](h
 ## Requirements
 
 - Python 3.11+
-- A model provider: llama.cpp `llama-server` + a GGUF model for the primary local path; Ollama is supported as fallback/compatibility; OpenRouter/OpenAI-compatible APIs are optional cloud providers
 - `rg` (ripgrep) for file search
 - Optional: `delta` for colored diffs, `fzf` for file picker
+
+You do **not** need to manually download a model, install llama.cpp, start a server, or choose a port for the default local setup. Rist manages those implementation details for you.
 
 ## Setup
 
@@ -25,39 +26,51 @@ rist setup
 rist
 ```
 
-`rist setup` starts a friendly onboarding wizard when run in a terminal. It
-detects CPU/RAM/GPU/VRAM, recommends a llama.cpp model profile, locates
-`llama-server`, helps you register an existing GGUF or explicitly install one
-from a URL plus SHA-256 checksum, saves persistent config under
-`~/.rist/config.json`, can start the managed llama.cpp runtime, runs a concise
-doctor check after startup, and optionally runs a quick benchmark. It never
-silently downloads models or binaries.
+`rist setup` is the primary onboarding path. It checks your hardware, chooses a recommended local runtime and coding model, downloads only assets listed in Rist's committed manifests, verifies SHA-256 checksums, installs files into the managed Rist data directory, starts the managed runtime, runs diagnostics, and saves configuration. If setup is interrupted, downloads use temporary files and verified artifacts are moved into place atomically so a later run can resume cleanly.
 
-Power users and automation can bypass prompts with flags or non-TTY stdin:
+Managed files live under the Rist data directory (`RIST_HOME` when set, otherwise the platform default used by Rist) with a predictable layout:
 
-```bash
-rist setup --yes --model-path /models/qwen2.5-coder-7b.gguf --start
-rist
+```text
+runtime/
+models/
+downloads/
+cache/
+logs/
+config/
 ```
 
-Ollama compatibility path, if you prefer it or already have Ollama running:
+### Managed runtime and model commands
 
 ```bash
-ollama pull qwen2.5-coder:7b
+rist model install qwen2.5-coder-7b
+rist model list
+rist model remove qwen2.5-coder-7b
+
+rist runtime install
+rist runtime update
+rist runtime status
+rist runtime uninstall
+```
+
+Rist uses `local_code/manifests/runtime_manifest.json` and `local_code/manifests/model_manifest.json` as the single source of truth for downloadable assets. Each entry includes an id, version, platform, architecture, URL, SHA-256, size, display name, description, license, and source.
+
+### Advanced setup
+
+Advanced users can still bring their own runtime, endpoint, or model path:
+
+```bash
+rist setup --yes --model-path /models/qwen2.5-coder-7b.gguf --llama-server /opt/llama.cpp/llama-server --start
+rist --provider llamacpp --base-url http://127.0.0.1:8080/v1
 rist --provider ollama
 ```
 
-The full-screen TUI is the default interactive experience; if `textual` isn't
-installed or stdout isn't a TTY, it falls back to the plain line-based REPL.
+Manual GGUF files, direct llama-server paths, custom ports, `--base-url`, and cloud/OpenAI-compatible providers remain supported, but they are no longer part of the default onboarding path.
+
+The full-screen TUI is the default interactive experience; if `textual` isn't installed or stdout isn't a TTY, it falls back to the plain line-based REPL.
 
 ### Configuration and migration
 
-Rist stores user configuration and managed runtime data in `~/.rist/`, including
-`~/.rist/models.json` and `~/.rist/runtimes/`. On first use, if
-`~/.local-code/` exists and `~/.rist/` does not, Rist safely copies the legacy
-directory and leaves the original untouched. If both directories exist, Rist
-uses `~/.rist/` without overwriting it. Set `RIST_HOME` to use a custom location;
-`LOCAL_CODE_HOME` remains supported as a compatibility override.
+Rist stores user configuration and managed runtime data in the Rist data directory. On first use, if legacy `~/.local-code/` data exists and the current Rist directory does not, Rist safely copies the legacy directory and leaves the original untouched. Set `RIST_HOME` to use a custom location; `LOCAL_CODE_HOME` remains supported as a compatibility override.
 
 ## Usage
 

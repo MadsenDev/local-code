@@ -33,3 +33,4 @@ testpaths = ["tests"]
 
 [tool.setuptools.package-data]
 "local_code.tui" = ["styles/*.tcss"]
+"local_code.manifests" = ["*.json"]
