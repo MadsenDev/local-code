@@ -11,6 +11,7 @@ from pathlib import Path
 from .agent import LocalPartner
 from .config import (
     DEFAULT_BACKEND_MODEL,
+    DEFAULT_PROVIDER,
     DEFAULT_FRONTEND_MODEL,
     DEFAULT_MODEL,
     DEFAULT_MODE,
@@ -19,6 +20,8 @@ from .config import (
     DEFAULT_TOOL_CALLING,
     DEFAULT_OLLAMA,
     DEFAULT_VERBOSITY,
+    load_runtime_config,
+    save_runtime_config,
     HELP_TEXT,
     MAX_TOOL_STEPS,
 )
@@ -26,8 +29,9 @@ from .memory import clear_chat_history, save_chat_history
 from .intelligence import DecisionService
 from .intelligence.indexer import format_index_report, index_repository
 from .paths import rist_home
-from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile
+from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile, recommend_gpu_profile, recommend_model_profiles
 from .llama_runtime import (
+    find_llama_server,
     install_llama_server,
     install_model,
     list_managed_models,
@@ -76,11 +80,11 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Rist - local-first AI coding agent for real developer hardware."
     )
-    parser.add_argument("command", nargs="?", choices=["chat", "doctor", "benchmark", "bench", "llama", "model", "index", "decisions"], help="Run diagnostics, benchmark, or llama.cpp helpers")
+    parser.add_argument("command", nargs="?", choices=["chat", "setup", "doctor", "benchmark", "bench", "llama", "model", "index", "decisions"], help="Run diagnostics, benchmark, or llama.cpp helpers")
     parser.add_argument(
         "llama_action",
         nargs="?",
-        choices=["doctor", "command", "install", "start", "stop", "status", "list", "register", "logs", "remove", "add", "accept", "supersede", "review", "reject", "merge"],
+        choices=["doctor", "command", "install", "tune", "start", "stop", "status", "restart", "list", "register", "logs", "remove", "add", "accept", "supersede", "review", "reject", "merge"],
         help="llama.cpp or managed-model action",
     )
     parser.add_argument("model_target", nargs="?", help="Managed model profile, e.g. qwen36")
@@ -107,8 +111,8 @@ def parse_args():
     parser.add_argument("--model-routing", choices=["single", "adaptive", "dual"], default=DEFAULT_MODEL_ROUTING, help=f"Model residency/routing strategy ({DEFAULT_MODEL_ROUTING})")
     parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs per prompt size (3)")
     parser.add_argument("--long-context", action="store_true", help="Include an optional long-context benchmark prompt")
-    parser.add_argument("--profile", default="qwen36-35b-a3b", help="llama.cpp command profile")
-    parser.add_argument("--gpu", default="rtx3060", help="llama.cpp hardware profile")
+    parser.add_argument("--profile", default="qwen2.5-coder-7b", help="llama.cpp command profile")
+    parser.add_argument("--gpu", default=None, help="llama.cpp hardware profile")
     parser.add_argument("--model-path", "--path", dest="model_path", default=None, help="GGUF path to print in the suggested llama-server command")
     parser.add_argument("--url", default=None, help="Explicit URL for a model GGUF or prebuilt llama-server binary")
     parser.add_argument("--sha256", default=None, help="Expected SHA-256 for a downloaded artifact")
@@ -138,7 +142,7 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8080, help="Port for a managed llama-server (8080)")
     parser.add_argument("--wait-timeout", type=float, default=120, help="Seconds to wait for a managed server to become ready (120)")
     parser.add_argument("--json", dest="json_output", action="store_true", help="Emit doctor/benchmark output as JSON")
-    parser.add_argument("--provider", choices=["ollama", "llamacpp", "openrouter", "openai"], default="ollama", help="Model provider (default: ollama)")
+    parser.add_argument("--provider", choices=["auto", "ollama", "llamacpp", "openrouter", "openai"], default=None, help="Model provider (default: auto)")
     parser.add_argument("--base-url", dest="base_url", default=None, help="Override the provider base URL (e.g. an OpenAI-compatible server)")
     parser.add_argument("--api-key", dest="api_key", default=None, help="API key for cloud providers (else read from env)")
     parser.add_argument("--no-preflight", dest="no_preflight", action="store_true", help="Skip the startup model/provider check")
@@ -969,6 +973,8 @@ def _handle_runtime_command(args):
         return 0
     if args.command == "llama" and action == "logs":
         return _show_managed_logs(args.tail, args.follow)
+    if args.command == "llama" and action == "tune":
+        return _run_llama_tune(args)
     if args.command != "model":
         return None
     if action == "list":
@@ -985,12 +991,17 @@ def _handle_runtime_command(args):
     if action == "status":
         _print_runtime_report(server_status(), args.json_output)
         return 0
+    if action == "logs":
+        return _show_managed_logs(args.tail, args.follow)
     if action == "stop":
         _print_runtime_report(stop_server(), args.json_output)
         return 0
-    target = args.model_target
+    if action == "restart":
+        stop_server()
+        action = "start"
+    target = _runtime_profile(args)
     if not target:
-        raise ValueError(f"`rist model {action or 'ACTION'}` requires a profile, e.g. qwen36.")
+        raise ValueError(f"`rist model {action or 'ACTION'}` requires a profile, e.g. qwen2.5-coder-7b.")
     if action == "install":
         if not args.url:
             raise ValueError("Model installation requires an explicit --url to a GGUF file; Hugging Face authentication is not managed yet.")
@@ -1055,21 +1066,22 @@ def _handle_runtime_command(args):
                 print(f"Warning: detected RAM ({system_ram} GB) is below the profile recommendation ({requirements['recommended_ram_gb']} GB).")
             if max_vram is not None and max_vram < requirements["recommended_vram_gb"]:
                 print(f"Warning: detected VRAM ({max_vram} GB) is below the profile recommendation ({requirements['recommended_vram_gb']} GB).")
-            settings = LLAMACPP_GPU_PROFILES.get(args.gpu, {})
+            gpu_profile = _effective_gpu(args, detected)
+            settings = LLAMACPP_GPU_PROFILES.get(gpu_profile, {})
             if settings.get("context", 0) > 32768 and (max_vram or 0) <= 12:
                 print("Warning: context above 32768 on a 12 GB-or-smaller GPU is experimental.")
             if profile.get("role") == "heavy_backend":
                 print("Warning: large MoE/heavy profiles are experimental; avoid frequent dual-model switching.")
         if args.dry_run:
             report = prepare_server_start(
-                target, args.gpu, model_path=args.model_path, executable=args.llama_server,
+                target, _effective_gpu(args), model_path=args.model_path, executable=args.llama_server,
                 host=args.host, port=args.port,
             )
             _print_dry_run(report, args.json_output)
             return 0
         report = start_server(
             target,
-            args.gpu,
+            _effective_gpu(args),
             model_path=args.model_path,
             executable=args.llama_server,
             host=args.host,
@@ -1078,7 +1090,7 @@ def _handle_runtime_command(args):
         )
         _print_runtime_report(report, args.json_output)
         return 0 if report["state"] in {"running", "ready"} else 1
-    raise ValueError("Model action must be one of: install, register, start, stop, status, list, remove.")
+    raise ValueError("Model action must be one of: install, register, start, restart, stop, status, logs, list, remove.")
 
 
 def _invoked_as_legacy_command() -> bool:
@@ -1154,11 +1166,98 @@ def _run_decisions(args):
     return 0
 
 
+
+def _effective_gpu(args, hardware=None):
+    if args.gpu:
+        return args.gpu
+    config = load_runtime_config()
+    configured = (config.get("llamacpp") or {}).get("gpu_profile")
+    if configured:
+        return configured
+    return recommend_gpu_profile(hardware or detect_hardware())
+
+
+def _runtime_profile(args):
+    config = load_runtime_config()
+    return args.model_target or (config.get("llamacpp") or {}).get("profile") or "qwen2.5-coder-7b"
+
+
+def _select_auto_provider(args):
+    config = load_runtime_config()
+    managed = server_status()
+    if managed.get("managed") and managed.get("state") in {"running", "ready"} and (managed.get("health") or {}).get("ready"):
+        return "llamacpp", managed.get("base_url") or (config.get("llamacpp") or {}).get("base_url")
+    llama_base = args.base_url or (config.get("llamacpp") or {}).get("base_url") or DEFAULT_LLAMACPP_BASE_URL
+    llama = build_provider("llamacpp", base_url=llama_base, api_key=args.api_key)
+    if not hasattr(llama, "available") or llama.available():
+        return "llamacpp", llama_base
+    ollama_base = args.ollama
+    ollama = build_provider("ollama", base_url=ollama_base)
+    if hasattr(ollama, "available") and ollama.available():
+        return "ollama", ollama_base
+    return "auto", None
+
+
+def _print_setup_guidance():
+    hardware = detect_hardware()
+    gpu_profile = recommend_gpu_profile(hardware)
+    recs = recommend_model_profiles(hardware)
+    config = load_runtime_config()
+    config["provider"] = "auto"
+    config["default_runtime"] = "llamacpp"
+    config["model"] = "local"
+    config["llamacpp"].update({
+        "profile": recs[0]["id"].replace("-llamacpp", "") if recs else "qwen2.5-coder-7b",
+        "gpu_profile": gpu_profile,
+        "context": LLAMACPP_GPU_PROFILES[gpu_profile]["context"],
+        "batch": LLAMACPP_GPU_PROFILES[gpu_profile]["batch"],
+        "ubatch": LLAMACPP_GPU_PROFILES[gpu_profile]["ubatch"],
+        "threads": min(hardware.cpu_count or 8, LLAMACPP_GPU_PROFILES[gpu_profile]["threads"]),
+    })
+    path = save_runtime_config(config)
+    print("Rist setup")
+    print(f"Detected RAM: {hardware.system_ram_gb or 'unknown'} GB")
+    if hardware.gpus:
+        for gpu in hardware.gpus:
+            print(f"Detected GPU: {gpu.name} ({gpu.vram_total_gb or 'unknown'} GB VRAM)")
+    else:
+        print("Detected GPU: none (CPU profile selected)")
+    print(f"Runtime: llama.cpp first (GPU profile: {gpu_profile})")
+    print("Recommended models:")
+    for profile in recs:
+        mark = "✓" if profile["status"] == "recommended" else "○"
+        print(f"  {mark} {profile['name']} — {profile['architecture']}, {profile['role']}, context {profile['recommended_context']}")
+    print("llama-server:", find_llama_server() or "not found yet; install with `rist llama install --url URL` or set LLAMA_SERVER")
+    print(f"Saved config: {path}")
+    print("Next:")
+    print(f"  rist model register {config['llamacpp']['profile']} --model-path /path/to/model.gguf")
+    print("  rist model start")
+    print("  rist")
+    return 0
+
+
+def _run_llama_tune(args):
+    config = load_runtime_config()
+    gpu = _effective_gpu(args)
+    settings = dict(LLAMACPP_GPU_PROFILES[gpu])
+    config["provider"] = "auto"
+    config["default_runtime"] = "llamacpp"
+    config["llamacpp"].update({"gpu_profile": gpu, "context": settings["context"], "batch": settings["batch"], "ubatch": settings["ubatch"], "threads": settings["threads"]})
+    path = save_runtime_config(config)
+    print("llama.cpp tuning")
+    print("Saved conservative best-known settings without running a live benchmark.")
+    print(f"Profile: {gpu}; context={settings['context']} batch={settings['batch']} ubatch={settings['ubatch']} threads={settings['threads']}")
+    print(f"Config: {path}")
+    print("Run `rist benchmark` with the server running for measured TTFT/tokens/sec recommendations.")
+    return 0
+
 def main():
     if _invoked_as_legacy_command():
         sys.stderr.write("local-code is deprecated and will be removed in a future release. Use `rist` instead.\n")
     rist_home()
     args = parse_args()
+    if args.command == "setup":
+        return _print_setup_guidance()
     if args.command == "decisions":
         return _run_decisions(args)
     if args.command == "chat":
@@ -1176,7 +1275,7 @@ def main():
         )
         print(to_json(report) if args.json_output else format_index_report(report))
         return 0
-    if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs"}):
+    if args.command == "model" or (args.command == "llama" and args.llama_action in {"install", "logs", "tune"}):
         try:
             return _handle_runtime_command(args)
         except ValueError as exc:
@@ -1187,7 +1286,7 @@ def main():
             return 1
     if args.command == "llama" and args.llama_action == "command":
         try:
-            report = generate_llama_server_command(args.profile, args.gpu, args.model_path)
+            report = generate_llama_server_command(args.profile, _effective_gpu(args), args.model_path)
         except ValueError as exc:
             sys.stderr.write(f"{exc}\n")
             return 2
@@ -1196,6 +1295,20 @@ def main():
     if args.command == "llama":
         args.provider = "llamacpp"
         args.command = args.llama_action or "doctor"
+    runtime_config = load_runtime_config()
+    requested_provider = args.provider or runtime_config.get("provider") or DEFAULT_PROVIDER
+    if requested_provider == "auto":
+        resolved_provider, resolved_base = _select_auto_provider(args)
+        if resolved_provider == "auto":
+            sys.stderr.write("No local model runtime is ready. Run `rist setup`, then `rist model register ...` and `rist model start`, or start Ollama.\n")
+            return 1
+        args.provider = resolved_provider
+        if resolved_provider == "llamacpp" and not args.base_url:
+            args.base_url = resolved_base
+        elif resolved_provider == "ollama" and resolved_base:
+            args.ollama = resolved_base
+    else:
+        args.provider = requested_provider
     explicit_model = args.model or args.frontend_model or args.frontend_model_alias or args.backend_model or args.backend_model_alias
     if args.provider not in {"ollama", "llamacpp"} and not explicit_model:
         sys.stderr.write(

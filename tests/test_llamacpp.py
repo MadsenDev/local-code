@@ -12,3 +12,17 @@ def test_rtx3060_command_is_generated_not_executed():
     assert "--host 127.0.0.1" in command
     assert "--port 8080" in command
     assert "does not execute" in format_llama_server_command(report)
+
+
+def test_dense_coder_profile_skips_moe_flags():
+    report = generate_llama_server_command("qwen2.5-coder-7b", "vram12", "/models/qwen7.gguf")
+    command = report["command"]
+    assert "--n-cpu-moe" not in command
+    assert "Qwen2.5 Coder 7B" in format_llama_server_command(report)
+
+
+def test_capability_gpu_profile_generates_command():
+    report = generate_llama_server_command("qwen2.5-coder-14b", "vram24", "/models/qwen14.gguf")
+    command = report["command"]
+    assert "-c 32768" in command
+    assert "-b 2048" in command
