@@ -16,7 +16,7 @@ class RuntimePanel(Static):
         table.add_row("Profile", getattr(partner, "profile", None) or "default")
         table.add_row("Routing", partner.routing_decision.get("mode", partner.model_routing))
         table.add_row("Context", self._context_label(partner))
-        table.add_row("Proposal", "pending" if partner.pending_plan else "clear")
+        table.add_row("Pending Proposal", "Yes" if partner.pending_plan else "No")
         table.add_row("Managed", "local" if partner.provider.is_local else "cloud")
         self.update(table)
 

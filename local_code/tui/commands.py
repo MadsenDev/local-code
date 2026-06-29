@@ -136,6 +136,15 @@ def build_commands() -> list[Command]:
     def run_benchmark(app):
         write_panel(app, format_benchmark(benchmark_model(app.partner.provider, app.partner.backend_model, num_ctx=app.partner.context_limit)), "benchmark")
 
+    def has_pending(app):
+        return bool(getattr(app.partner, "pending_plan", None))
+
+    def apply_pending(app):
+        app._open_review_screen()
+
+    def reject_pending(app):
+        app._review_dismissed("reject")
+
     add(id="conversation.new", title="New conversation", subtitle="Start a fresh conversation", category="Conversation", keywords=("reset",), callback=lambda app: (app.partner.history.clear(), setattr(app.partner, "pending_plan", None), app.conversation.clear(), app.conversation.write_welcome(app.partner.mode), app._refresh_status()))
     add(id="conversation.clear", title="Clear conversation", subtitle="Clear the visible transcript", category="Conversation", keywords=("history",), callback=lambda app: (app.partner.history.clear(), setattr(app.partner, "pending_plan", None), app.conversation.clear(), app._refresh_status()))
     add(id="conversation.copy_last", title="Copy last response", subtitle="Copy the latest assistant response", category="Conversation", keywords=("clipboard",), callback=lambda app: app._copy_last_response())
@@ -152,6 +161,9 @@ def build_commands() -> list[Command]:
     for scope in ("edit", "command"):
         for mode in ("ask", "allow", "deny"):
             add(id=f"permission.{scope}.{mode}", title=f"{scope.title()} permission → {mode.title()}", subtitle=f"Set {scope} permission to {mode}", category="Permissions", keywords=(scope, mode, "permission"), callback=set_permission(scope, mode))
+    add(id="proposal.review", title="Review pending proposal", subtitle="Open the dedicated diff review screen", category="Proposal", keywords=("diff", "review"), callback=lambda app: app._open_review_screen(), enabled=has_pending)
+    add(id="proposal.apply", title="Apply pending proposal", subtitle="Review and apply all pending changes", category="Proposal", keywords=("approve", "apply"), callback=apply_pending, enabled=has_pending)
+    add(id="proposal.reject", title="Reject pending proposal", subtitle="Discard the pending proposal", category="Proposal", keywords=("deny", "reject"), callback=reject_pending, enabled=has_pending)
     add(id="context.usage", title="Show context usage", subtitle="Display token budget by source", category="Context", keywords=("tokens",), callback=lambda app: app._show_context_usage())
     add(id="session.quit", title="Quit", subtitle="Exit Rist", category="Session", keywords=("exit",), callback=lambda app: app.exit())
     return commands
