@@ -36,6 +36,12 @@ class ActivityTimeline(Vertical):
             self.log.write(Panel(Text(str(event.get("text", "")), style="dim"), title="TRACE", title_align="left", border_style="bright_black", padding=(0, 1)))
         elif kind == "command":
             self.log.write(Panel(Text(str(event.get("title", "")), style="text-muted"), title="COMMAND", title_align="left", border_style="magenta", padding=(0, 1)))
+        elif kind == "task":
+            self.log.write(Panel(Text(str(event.get("text", "")), style="text-muted"), title="TASK", title_align="left", border_style="blue", padding=(0, 1)))
+        elif kind == "task_complete":
+            self.log.write(Panel(Text(str(event.get("text", "")), style="dim"), title="TASK COMPLETE", title_align="left", border_style="green", padding=(0, 1)))
+        elif kind == "task_failed":
+            self.log.write(Panel(Text(str(event.get("text", "")), style="red"), title="TASK FAILED", title_align="left", border_style="red", padding=(0, 1)))
         elif kind == "diff":
             body = Text(f"{event.get('files', 0)} files  ", style="dim")
             body.append(f"+{event.get('added', 0)} ", style="green")

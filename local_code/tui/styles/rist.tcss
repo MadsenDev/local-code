@@ -216,3 +216,40 @@ DiffReviewScreen {
 #review-actions Button {
     margin: 1 2;
 }
+
+RuntimeStatusScreen, DoctorResultsScreen, BenchmarkResultsScreen {
+    align: center middle;
+    background: #0f141980;
+}
+
+#result-box {
+    width: 86%;
+    height: 82%;
+    padding: 1 2;
+    background: #151d26;
+    border: round #5e81ac;
+}
+
+.result-title {
+    height: 1;
+    color: #8fbcbb;
+    text-style: bold;
+}
+
+.result-body {
+    height: auto;
+    margin-top: 1;
+}
+
+.result-details {
+    height: 1fr;
+    margin-top: 1;
+    padding-top: 1;
+    border-top: solid #263241;
+    overflow: auto;
+}
+
+.result-hint {
+    height: 1;
+    color: #7f8b99;
+}
