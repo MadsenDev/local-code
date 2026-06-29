@@ -25,20 +25,20 @@ rist setup
 rist
 ```
 
-For the zero-friction llama.cpp path, register an existing GGUF during setup and
-start the managed runtime in one step:
+`rist setup` starts a friendly onboarding wizard when run in a terminal. It
+detects CPU/RAM/GPU/VRAM, recommends a llama.cpp model profile, locates
+`llama-server`, helps you register an existing GGUF or explicitly install one
+from a URL plus SHA-256 checksum, saves persistent config under
+`~/.rist/config.json`, can start the managed llama.cpp runtime, runs a concise
+doctor check after startup, and optionally runs a quick benchmark. It never
+silently downloads models or binaries.
+
+Power users and automation can bypass prompts with flags or non-TTY stdin:
 
 ```bash
-rist setup --model-path /models/qwen2.5-coder-7b.gguf --start
+rist setup --yes --model-path /models/qwen2.5-coder-7b.gguf --start
 rist
 ```
-
-`rist setup` detects hardware, recommends a llama.cpp model profile and GPU
-profile, saves persistent config under `~/.rist/config.json`, detects
-`llama-server` from `--llama-server`, `LLAMA_SERVER`, `PATH`, or Rist's runtime
-directory, optionally registers the GGUF passed with `--model-path`, and can
-start the managed llama.cpp runtime with `--start`. It never downloads models or
-binaries unless you explicitly use the existing URL/checksum install commands.
 
 Ollama compatibility path, if you prefer it or already have Ollama running:
 
@@ -90,7 +90,7 @@ rist --model-routing dual     # explicitly preserve separate role models
 rist doctor
 
 # Measure model latency and generation throughput
-rist benchmark --model qwen2.5-coder:7b --benchmark-runs 3
+rist benchmark --benchmark-runs 3
 
 # Set interaction mode
 rist --mode chat      # conversational only
@@ -223,7 +223,8 @@ rist model stop
 rist llama doctor
 
 # Run small/medium latency, TTFT, and throughput tests.
-rist bench --provider llamacpp --model local --benchmark-runs 3
+rist benchmark
+rist benchmark --provider llamacpp --model local --benchmark-runs 3
 rist bench --provider llamacpp --model local --long-context
 
 # Use the external server for normal rist work.

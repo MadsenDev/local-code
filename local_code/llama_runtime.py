@@ -136,6 +136,8 @@ def model_key(profile_id: str) -> str:
 
 def install_model(profile_id: str, url: str, *, filename: str | None = None, sha256: str | None = None, force=False):
     """Download and register a GGUF selected by profile and explicit URL."""
+    if not sha256:
+        raise ValueError("Model installation from URL requires --sha256 to verify the GGUF.")
     profile = get_llamacpp_profile(profile_id)
     name = filename or Path(urllib.parse.urlparse(url).path).name
     if filename and Path(filename).name != filename:
@@ -164,8 +166,14 @@ def register_model(profile_id: str, model_path: str):
     """Register an existing GGUF without copying or parsing it."""
     profile = get_llamacpp_profile(profile_id)
     path = Path(model_path).expanduser().resolve()
-    if not path.is_file():
+    if not path.exists():
         raise FileNotFoundError(f"GGUF file not found: {path}")
+    if path.is_dir():
+        raise IsADirectoryError(f"GGUF path is a directory, not a file: {path}")
+    if not path.is_file():
+        raise FileNotFoundError(f"GGUF path is not a regular file: {path}")
+    if not os.access(path, os.R_OK):
+        raise PermissionError(f"GGUF file is not readable: {path}")
     if path.suffix.lower() != ".gguf":
         raise ValueError("The model path must point to a .gguf file.")
     registry = _load_registry()
