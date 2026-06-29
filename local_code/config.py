@@ -1,3 +1,4 @@
+import json
 import re
 
 # Recommended-minimum standard: one shared coder model that fits a 12 GB GPU
@@ -90,3 +91,53 @@ SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇",
 READ_FILE_DEFAULT_END = 500
 
 TEST_COMMAND_PATTERNS = ("pytest", "npm test", "yarn test", "pnpm test", "jest", "vitest", "cargo test", "go test", "rspec")
+
+# --- Persistent zero-friction runtime config ---------------------------
+DEFAULT_PROVIDER = "auto"
+DEFAULT_RUNTIME = "llamacpp"
+RUNTIME_CONFIG_NAME = "config.json"
+
+
+def default_runtime_config():
+    return {
+        "provider": DEFAULT_PROVIDER,
+        "default_runtime": DEFAULT_RUNTIME,
+        "model": "local",
+        "llamacpp": {
+            "profile": "qwen2.5-coder-7b",
+            "gpu_profile": "cpu",
+            "context": DEFAULT_NUM_CTX,
+            "batch": 512,
+            "ubatch": 512,
+            "threads": 8,
+            "base_url": "http://127.0.0.1:8080/v1",
+        },
+    }
+
+
+def runtime_config_path():
+    from .paths import rist_home
+    return rist_home() / RUNTIME_CONFIG_NAME
+
+
+def load_runtime_config():
+    path = runtime_config_path()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default_runtime_config()
+    base = default_runtime_config()
+    if isinstance(data, dict):
+        base.update({k: v for k, v in data.items() if k != "llamacpp"})
+        if isinstance(data.get("llamacpp"), dict):
+            base["llamacpp"].update(data["llamacpp"])
+    return base
+
+
+def save_runtime_config(config):
+    path = runtime_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(".tmp")
+    temp.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temp.replace(path)
+    return path
