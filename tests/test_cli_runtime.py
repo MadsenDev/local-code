@@ -1,4 +1,5 @@
 import sys
+import urllib.error
 
 from local_code import cli
 
@@ -320,3 +321,57 @@ def test_model_install_uses_manifest_without_explicit_url(monkeypatch, capsys):
     assert cli.main() == 0
     assert calls[0][1] is None
     assert "managed manifest" in capsys.readouterr().out
+
+
+def test_managed_setup_skips_downloads_when_assets_installed(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(cli, "managed_runtime_installed", lambda asset=None: {"executable": "/rist/runtime/llama-server", "reused": True})
+    monkeypatch.setattr(cli, "managed_model_installed", lambda profile, asset=None: {"profile": profile + "-llamacpp", "path": "/rist/models/qwen.gguf", "reused": True})
+    monkeypatch.setattr(cli, "install_llama_server", lambda **k: (_ for _ in ()).throw(AssertionError("runtime download should be skipped")))
+    monkeypatch.setattr(cli, "install_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError("model download should be skipped")))
+    monkeypatch.setattr(cli, "start_server", lambda *a, **k: {"state": "ready", "base_url": "http://127.0.0.1:8080/v1"})
+    monkeypatch.setattr(cli, "doctor_report", lambda *a, **k: {"provider_available": True, "models_endpoint": True, "chat_completions": True})
+    monkeypatch.setattr(cli, "build_provider", lambda *a, **k: object())
+    monkeypatch.setattr(sys, "argv", ["rist", "setup", "--yes"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "✓ Runtime already installed" in out
+    assert "✓ Model already installed" in out
+    assert "Setup complete" in out
+
+
+def test_force_reinstall_ignores_installed_assets(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    calls = []
+    monkeypatch.setattr(cli, "managed_runtime_installed", lambda asset=None: {"executable": "/old", "reused": True})
+    monkeypatch.setattr(cli, "managed_model_installed", lambda profile, asset=None: {"profile": profile + "-llamacpp", "path": "/old.gguf", "reused": True})
+    monkeypatch.setattr(cli, "install_llama_server", lambda **k: calls.append(("runtime", k.get("force"))) or {"executable": "/new/llama-server"})
+    monkeypatch.setattr(cli, "install_model", lambda profile, **k: calls.append(("model", k.get("force"))) or {"profile": profile + "-llamacpp", "path": "/new.gguf"})
+    monkeypatch.setattr(cli, "start_server", lambda *a, **k: {"state": "ready", "base_url": "http://127.0.0.1:8080/v1"})
+    monkeypatch.setattr(cli, "doctor_report", lambda *a, **k: {"provider_available": True, "models_endpoint": True, "chat_completions": True})
+    monkeypatch.setattr(cli, "build_provider", lambda *a, **k: object())
+    monkeypatch.setattr(sys, "argv", ["rist", "setup", "--yes", "--force"])
+    assert cli.main() == 0
+    assert calls[:2] == [("runtime", True), ("model", True)]
+
+
+def test_friendly_error_formatting():
+    assert "Downloaded file could not be verified" in cli._friendly_setup_error(RuntimeError("SHA-256 mismatch: bad"))
+    assert "Unable to download required files" in cli._friendly_setup_error(urllib.error.URLError("network unreachable"))
+    assert "local runtime could not be started" in cli._friendly_setup_error(RuntimeError("llama-server failed to start"))
+    assert "Model installation did not complete" in cli._friendly_setup_error(RuntimeError("model download failed"))
+
+
+def test_runtime_start_retries_after_timeout(monkeypatch, capsys):
+    args = cli.parse_args.__globals__["argparse"].Namespace(host="127.0.0.1", port=8080, wait_timeout=1)
+    calls = []
+    def fake_start(*a, **k):
+        calls.append(k)
+        if len(calls) == 1:
+            raise RuntimeError("llama-server failed to become healthy within 1 seconds")
+        return {"state": "ready", "base_url": "http://127.0.0.1:8080/v1"}
+    monkeypatch.setattr(cli, "start_server", fake_start)
+    monkeypatch.setattr(cli, "stop_server", lambda: {"state": "stopped"})
+    assert cli._start_runtime_with_retries("qwen2.5-coder-7b", "cpu", "/bin/llama-server", args, retries=1)["state"] == "ready"
+    assert len(calls) == 2
+    assert "Retrying" in capsys.readouterr().out

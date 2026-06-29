@@ -26,17 +26,29 @@ rist setup
 rist
 ```
 
-`rist setup` is the primary onboarding path. It checks your hardware, chooses a recommended local runtime and coding model, downloads only assets listed in Rist's committed manifests, verifies SHA-256 checksums, installs files into the managed Rist data directory, starts the managed runtime, runs diagnostics, and saves configuration. If setup is interrupted, downloads use temporary files and verified artifacts are moved into place atomically so a later run can resume cleanly.
+`rist setup` is the primary onboarding path. It checks your hardware, chooses a recommended local runtime and coding model, downloads only assets listed in Rist's committed manifests, verifies SHA-256 checksums, installs files into the managed Rist data directory, starts the managed runtime, runs diagnostics, and saves configuration. The installer is incremental and resumable: if the managed runtime, model, or configuration already exists and matches the current manifest, setup reuses it instead of downloading it again. If setup is interrupted, downloads use temporary files and verified artifacts are moved into place atomically so a later run can resume cleanly without leaving corrupted models or half-installed binaries. Use `rist setup --force` to discard and reinstall managed assets when you intentionally want a fresh download.
 
 Managed files live under the Rist data directory (`RIST_HOME` when set, otherwise the platform default used by Rist) with a predictable layout:
 
 ```text
-runtime/
-models/
-downloads/
+runtime/     # managed llama-server and install metadata
+models/      # verified managed GGUF files
+downloads/   # reusable verified archives and temporary .part downloads
 cache/
 logs/
-config/
+config/      # saved runtime configuration
+```
+
+Returning users can safely run setup again:
+
+```text
+✓ Runtime already installed
+✓ Model already installed
+✓ Configuration already exists
+Checking runtime...
+Starting runtime...
+✓ Ready
+Done.
 ```
 
 ### Managed runtime and model commands

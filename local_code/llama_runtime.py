@@ -94,12 +94,58 @@ def find_llama_server(explicit: str | None = None) -> str | None:
     return None
 
 
-def _download(url: str, destination: Path, *, sha256: str | None = None, force=False, timeout=60):
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _verified_file(path: Path, sha256: str | None) -> bool:
+    return path.is_file() and bool(sha256) and _sha256_file(path).lower() == sha256.lower()
+
+
+def runtime_install_state_path() -> Path:
+    return runtime_dir() / "install.json"
+
+
+def _load_runtime_install_state():
+    try:
+        data = json.loads(runtime_install_state_path().read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def managed_runtime_installed(asset: dict | None = None) -> dict | None:
+    asset = asset or select_asset("runtime", "llama.cpp")
+    archive = downloads_dir() / "runtime" / Path(urllib.parse.urlparse(asset["url"]).path).name
+    executable = runtime_dir() / "bin" / ("llama-server.exe" if os.name == "nt" else "llama-server")
+    state = _load_runtime_install_state()
+    if executable.is_file() and os.access(executable, os.X_OK) and _verified_file(archive, asset.get("sha256")) and state.get("manifest", {}).get("version") == asset.get("version"):
+        return {"executable": str(executable.resolve()), "archive": str(archive.resolve()), "sha256": asset.get("sha256"), "manifest": asset, "reused": True}
+    return None
+
+
+def managed_model_installed(profile_id: str, asset: dict | None = None) -> dict | None:
+    asset = asset or select_asset("model", profile_id)
+    profile = get_llamacpp_profile(profile_id)
+    entry = _load_registry().get(profile["id"]) or {}
+    path = Path(entry.get("path", "")) if entry.get("path") else None
+    if path and _verified_file(path, asset.get("sha256")) and (entry.get("manifest") or {}).get("version") == asset.get("version"):
+        return {"profile": profile["id"], "path": str(path.resolve()), "sha256": asset.get("sha256"), "manifest": asset, "reused": True}
+    return None
+
+
+def _download(url: str, destination: Path, *, sha256: str | None = None, force=False, timeout=60, progress=None):
     scheme = urllib.parse.urlparse(url).scheme.lower()
     if scheme not in {"http", "https", "file"}:
         raise ValueError("Artifact URL must use http, https, or file.")
     if destination.exists() and not force:
-        raise FileExistsError(f"{destination} already exists; pass --force to replace it.")
+        if sha256 and _verified_file(destination, sha256):
+            return {"path": str(destination), "bytes": destination.stat().st_size, "sha256": sha256.lower(), "content_length": destination.stat().st_size, "reused": True}
+        destination.unlink()
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_name(destination.name + ".part")
     digest = hashlib.sha256()
@@ -116,6 +162,8 @@ def _download(url: str, destination: Path, *, sha256: str | None = None, force=F
                 output.write(chunk)
                 digest.update(chunk)
                 downloaded += len(chunk)
+                if progress:
+                    progress(downloaded, total)
         actual = digest.hexdigest()
         if sha256 and actual.lower() != sha256.lower():
             raise ValueError(f"SHA-256 mismatch: expected {sha256.lower()}, got {actual}.")
@@ -152,23 +200,33 @@ def _extract_llama_server(archive: Path, target: Path) -> None:
     raise FileNotFoundError("The runtime archive did not contain llama-server.")
 
 
-def install_llama_server(url: str | None = None, *, destination: str | None = None, sha256: str | None = None, force=False, manifest_id="llama.cpp"):
+def install_llama_server(url: str | None = None, *, destination: str | None = None, sha256: str | None = None, force=False, manifest_id="llama.cpp", progress=None):
     """Download a manifest-approved prebuilt llama-server binary."""
     asset = None
     if url is None:
         asset = select_asset("runtime", manifest_id)
         url = asset["url"]
         sha256 = asset["sha256"]
+    if asset and not destination and not force:
+        installed = managed_runtime_installed(asset)
+        if installed:
+            return installed
     target = Path(destination).expanduser() if destination else runtime_dir() / "bin" / ("llama-server.exe" if os.name == "nt" else "llama-server")
     archive_suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
     if archive_suffix in {".zip", ".gz", ".tgz", ".tar"}:
         archive = downloads_dir() / "runtime" / Path(urllib.parse.urlparse(url).path).name
-        report = _download(url, archive, sha256=sha256, force=force)
+        report = _download(url, archive, sha256=sha256, force=force, progress=progress)
         _extract_llama_server(archive, target)
         report["archive"] = str(archive.resolve())
     else:
-        report = _download(url, target, sha256=sha256, force=force)
+        report = _download(url, target, sha256=sha256, force=force, progress=progress)
     target.chmod(target.stat().st_mode | 0o755)
+    if asset and not destination:
+        state = {"executable": str(target.resolve()), "archive": report.get("archive"), "sha256": report.get("sha256"), "manifest": asset, "installed_at": int(time.time())}
+        runtime_install_state_path().parent.mkdir(parents=True, exist_ok=True)
+        temp = runtime_install_state_path().with_suffix(".tmp")
+        temp.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        temp.replace(runtime_install_state_path())
     report.update({"executable": str(target.resolve()), "manifest": asset})
     return report
 
@@ -194,13 +252,17 @@ def model_key(profile_id: str) -> str:
     return profile["id"]
 
 
-def install_model(profile_id: str, url: str | None = None, *, filename: str | None = None, sha256: str | None = None, force=False):
+def install_model(profile_id: str, url: str | None = None, *, filename: str | None = None, sha256: str | None = None, force=False, progress=None):
     """Download and register a manifest-approved model, or an advanced explicit URL with SHA-256."""
     asset = None
     if url is None:
         asset = select_asset("model", profile_id)
         url = asset["url"]
         sha256 = asset["sha256"]
+    if asset and not force:
+        installed = managed_model_installed(profile_id, asset)
+        if installed:
+            return installed
     if not sha256:
         raise ValueError("Model download could not be verified because no SHA-256 was provided.")
     profile = get_llamacpp_profile(profile_id)
@@ -212,7 +274,7 @@ def install_model(profile_id: str, url: str | None = None, *, filename: str | No
     if not name.lower().endswith(".gguf"):
         raise ValueError("The model destination must use a .gguf filename.")
     target = models_dir() / profile["id"] / name
-    report = _download(url, target, sha256=sha256, force=force, timeout=120)
+    report = _download(url, target, sha256=sha256, force=force, timeout=120, progress=progress)
     registry = _load_registry()
     registry[profile["id"]] = {
         "profile": profile["id"],
