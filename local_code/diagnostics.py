@@ -268,6 +268,18 @@ def format_doctor(report):
     return "\n".join(line for line in lines if line is not None)
 
 
+def _performance_summary(summary):
+    tps = summary.get("median_tokens_per_second")
+    ttft = summary.get("median_ttft_s")
+    if tps is None:
+        return "Needs tuning"
+    if tps >= 20 and (ttft is None or ttft <= 2):
+        return "Excellent"
+    if tps >= 8 and (ttft is None or ttft <= 5):
+        return "Good"
+    return "Needs tuning"
+
+
 def format_benchmark(report):
     summary = report["summary"]
     lines = [f"Benchmark: {report['model']}", f"Provider: {report['provider']}", f"Context: {report['num_ctx']:,} tokens"]
@@ -280,6 +292,9 @@ def format_benchmark(report):
     if summary["median_tokens_per_second"] is not None:
         lines.append(f"Median generation: {summary['median_tokens_per_second']} tok/s")
     lines.append("Suitability: " + ", ".join(f"{name.replace('_', ' ')}={value}" for name, value in report["suitability"].items()))
+    lines.append("")
+    lines.append("Performance summary")
+    lines.append(_performance_summary(summary))
     return "\n".join(lines)
 
 

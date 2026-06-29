@@ -28,7 +28,9 @@ def test_install_and_list_model_from_explicit_url(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCAL_CODE_HOME", str(tmp_path / "home"))
     source = tmp_path / "source.gguf"
     source.write_bytes(b"GGUF test bytes")
-    report = runtime.install_model("qwen36", source.as_uri())
+    import hashlib
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    report = runtime.install_model("qwen36", source.as_uri(), sha256=digest)
     assert Path(report["path"]).read_bytes() == b"GGUF test bytes"
     listed = runtime.list_managed_models()
     assert listed[0]["id"] == "qwen36-35b-a3b-llamacpp"

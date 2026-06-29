@@ -239,3 +239,73 @@ def test_llama_tune_honestly_reports_conservative_only(monkeypatch, capsys):
     out = capsys.readouterr().out.lower()
     assert "no measured tuning was run" in out
     assert "conservative" in out
+
+
+def test_setup_interactive_skip_benchmark(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "qwen.gguf"; model.write_bytes(b"gguf")
+    server = tmp_path / "llama-server"; server.write_text("#!/bin/sh\n", encoding="utf-8"); server.chmod(0o755)
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    answers = iter(["1", "1", str(model), "y", "n"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli, "find_llama_server", lambda explicit=None: str(server))
+    monkeypatch.setattr(cli, "start_server", lambda *a, **k: {"state": "ready", "base_url": "http://127.0.0.1:8080/v1"})
+    monkeypatch.setattr(cli, "doctor_report", lambda *a, **k: {"provider_available": True, "models_endpoint": True, "chat_completions": True})
+    monkeypatch.setattr(cli, "build_provider", lambda *a, **k: object())
+    calls = []
+    monkeypatch.setattr(cli, "benchmark_model", lambda *a, **k: calls.append(1))
+    monkeypatch.setattr(sys, "argv", ["rist", "setup"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "Welcome to Rist" in out
+    assert "✓ Runtime reachable" in out
+    assert not calls
+
+
+def test_setup_interactive_accepts_benchmark(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "qwen.gguf"; model.write_bytes(b"gguf")
+    server = tmp_path / "llama-server"; server.write_text("#!/bin/sh\n", encoding="utf-8"); server.chmod(0o755)
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    answers = iter(["1", "1", str(model), "y", "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli, "find_llama_server", lambda explicit=None: str(server))
+    monkeypatch.setattr(cli, "start_server", lambda *a, **k: {"state": "ready", "base_url": "http://127.0.0.1:8080/v1"})
+    monkeypatch.setattr(cli, "doctor_report", lambda *a, **k: {"provider_available": True, "models_endpoint": True, "chat_completions": True})
+    monkeypatch.setattr(cli, "build_provider", lambda *a, **k: object())
+    monkeypatch.setattr(cli, "benchmark_model", lambda *a, **k: {"model":"local","provider":"p","num_ctx":1,"cases":{},"summary":{"median_ttft_s":1,"median_tokens_per_second":30},"suitability":{}})
+    monkeypatch.setattr(sys, "argv", ["rist", "setup"])
+    assert cli.main() == 0
+    assert "Performance summary" in capsys.readouterr().out
+
+
+def test_setup_interactive_missing_llama_server(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    answers = iter(["1", "3"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli, "find_llama_server", lambda explicit=None: None)
+    monkeypatch.setattr(sys, "argv", ["rist", "setup"])
+    assert cli.main() == 0
+    out = capsys.readouterr().out
+    assert "llama-server was not found" in out
+    assert "pass --llama-server" in out
+
+
+def test_setup_start_failure_prints_doctor(tmp_path, monkeypatch, capsys):
+    model = tmp_path / "qwen.gguf"; model.write_bytes(b"gguf")
+    server = tmp_path / "llama-server"; server.write_text("#!/bin/sh\n", encoding="utf-8"); server.chmod(0o755)
+    monkeypatch.setenv("RIST_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    answers = iter(["1", "1", str(model), "y"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+    monkeypatch.setattr(cli, "find_llama_server", lambda explicit=None: str(server))
+    monkeypatch.setattr(cli, "start_server", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(cli, "build_provider", lambda *a, **k: type("P", (), {"is_local": True, "name": "llamacpp", "available": lambda self: False, "describe": lambda self: "llama"})())
+    monkeypatch.setattr(sys, "argv", ["rist", "setup"])
+    assert cli.main() == 0
+    assert "Startup failed: boom" in capsys.readouterr().out
