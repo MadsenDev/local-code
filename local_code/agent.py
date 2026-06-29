@@ -247,8 +247,24 @@ class LocalCodeAgent:
         ]
         return ("\n" + indent).join(lines) + "\n" + indent
 
+    def _discovery_rules_block(self, contract):
+        if contract.get("task_kind") != "repo_discovery":
+            return ""
+        indent = " " * 12
+        lines = [
+            "- This is AI-led repository discovery. Use repo_map/list_files/search_files/read_file yourself; do not merely restate discovery_seed.",
+            "- First understand the user's requested level of detail. Then inspect documentation, package/config metadata, runtime entrypoints, and representative feature implementation files.",
+            "- Treat README claims as documented intent and source files as implementation evidence. Distinguish the two in the final report.",
+            "- Continue reading until the user's question is answered with file-grounded evidence, not merely until a framework is identified.",
+            "- Cite repo-relative file paths in findings. Never claim documentation is absent without checking for it.",
+            "- Final confidence must be high, medium, or low. If intent is ambiguous, set needs_clarification=true and ask one concrete clarifying_question.",
+            "- If the answer is useful but meaningful areas remain unexplored, use medium confidence, list open_questions, and suggest specific deeper scopes the user may approve.",
+        ]
+        return ("\n" + indent).join(lines) + "\n" + indent
+
     def system_prompt(self, contract, memory_text):
         approved_plan_rules = self._approved_plan_rules_block(contract)
+        discovery_rules = self._discovery_rules_block(contract)
         return textwrap.dedent(
             f"""\
             You are the backend half of a local coding partner.
@@ -268,7 +284,7 @@ class LocalCodeAgent:
             {"read-only inspection; only repo_map, repo_overview, list_files, search_files, read_file, and final are allowed." if contract.get("read_only") or contract.get("edit_policy") == "inspect" else "full tool mode subject to permissions and edit_policy."}
 
             Rules:
-            {approved_plan_rules}- Follow the contract strictly.
+            {approved_plan_rules}{discovery_rules}- Follow the contract strictly.
             - If the contract includes intent_analysis, use it as the first-pass interpretation of the user's actual goal, non-goals, needed context, risks, and success criteria.
             - Before editing, explicitly satisfy the intent_analysis needed_context where applicable and avoid the not_the_goal items.
             - If the contract contains pasted context/output, analyze that pasted evidence first.
@@ -295,6 +311,11 @@ class LocalCodeAgent:
                 "diff_summary": "unified diff of proposed changes (--- a/path, +++ b/path, @@ lines) for plan/propose mode; git diff --stat output for execute mode",
                 "tests_run": ["..."],
                 "risks": ["..."],
+                "confidence": "high|medium|low",
+                "open_questions": ["..."],
+                "suggested_deeper_scope": ["..."],
+                "needs_clarification": true_or_false,
+                "clarifying_question": "one question when clarification is needed",
                 "needs_approval": true_or_false,
                 "plan": ["concrete step 1", "concrete step 2"],
                 "decision_candidates": [{{"title":"...","rationale":"...","alternatives":[],"consequences":[],"affected_components":[],"source_references":[]}}]
@@ -704,7 +725,11 @@ class LocalCodeAgent:
     def run_contract(self, contract, memory_text):
         self.command_approval_cache = {}
         self.command_prefix_approval_cache = {}
-        if contract.get("edit_policy") == "inspect" and contract.get("files_of_interest"):
+        if (
+            contract.get("edit_policy") == "inspect"
+            and contract.get("files_of_interest")
+            and contract.get("task_kind") != "repo_discovery"
+        ):
             return self.direct_report(contract, memory_text)
         messages = [{"role": "system", "content": self.system_prompt(contract, memory_text)}]
         if contract.get("edit_policy") in {"inspect", "plan", "propose"}:
@@ -713,6 +738,7 @@ class LocalCodeAgent:
             "commands_run": [],
             "files_read": set(),
             "files_changed": set(),
+            "evidence": [],
         }
         self.last_backend_action = None
         self.last_backend_action_signature = None
@@ -723,7 +749,8 @@ class LocalCodeAgent:
         plan_pushback_count = 0
         noop_final_count = 0
 
-        for step in range(1, self.max_steps + 1):
+        step_limit = min(24, max(1, int(contract.get("max_tool_steps") or self.max_steps)))
+        for step in range(1, step_limit + 1):
             if self.cancel_event.is_set():
                 self.transcript_print("Cancelled", ["User cancelled the backend loop."], color=UI.YELLOW)
                 return normalize_backend_report(
@@ -966,6 +993,12 @@ class LocalCodeAgent:
             result = self.tool_result(tool, args, contract, tracker)
             tool_elapsed = time.monotonic() - tool_started
             self.print_tool_transcript(tool, args, result, tool_elapsed)
+            if contract.get("task_kind") == "repo_discovery" and tool in {"repo_map", "repo_overview", "list_files", "search_files", "read_file"}:
+                tracker["evidence"].append({
+                    "tool": tool,
+                    "args": args,
+                    "result": str(result)[:1800],
+                })
             messages.append({"role": "user", "content": f"Tool result for {tool}:\n{result}"})
             cycle_detected = (
                 self._action_seen_counts.get(signature, 0) >= 3
@@ -990,16 +1023,109 @@ class LocalCodeAgent:
                     }
                 )
 
-        return normalize_backend_report(
+        if contract.get("task_kind") == "repo_discovery":
+            # Reserve one synthesis-only call after exploration. Small local
+            # models often spend the entire tool budget reading useful files
+            # and otherwise never emit their final report.
+            messages.append({
+                "role": "user",
+                "content": (
+                    "The repository exploration budget is exhausted. Do not call another read/search/list tool. "
+                    "Call final now and synthesize the evidence already collected. Include confidence, open_questions, "
+                    "suggested_deeper_scope, and a yes/no clarifying_question only if needed."
+                ),
+            })
+            try:
+                action, _raw = self.request_action(messages, contract)
+                if action.get("tool") == "final":
+                    args = validate_tool_call("final", action.get("args") or {}, self.allowed_tool_names(contract))
+                    message = args.get("message", "")
+                    report = normalize_backend_report(
+                        message if isinstance(message, dict) or (isinstance(message, str) and message.strip().startswith("{")) else args,
+                        fallback_message="Repository exploration completed without a detailed report.",
+                    )
+                    report["commands_run"] = report["commands_run"] or tracker["commands_run"]
+                    report["files_read"] = report["files_read"] or sorted(tracker["files_read"])
+                    report["files_changed"] = report["files_changed"] or sorted(tracker["files_changed"])
+                    self.transcript_print(
+                        f"Finished backend report ({len(report['files_read'])} file(s) read)",
+                        [summarize_text(report.get("summary", "Repository discovery finished."), 220)],
+                        color=UI.GREEN,
+                    )
+                    return report
+            except Exception as exc:  # noqa: BLE001
+                self.trace_print(f"final discovery synthesis failed: {exc}")
+            synthesized = self.synthesize_discovery_report(contract, tracker)
+            if synthesized is not None:
+                self.transcript_print(
+                    f"Synthesized discovery report ({len(synthesized['files_read'])} file(s) read)",
+                    [summarize_text(synthesized.get("summary", "Repository discovery finished."), 220)],
+                    color=UI.GREEN,
+                )
+                return synthesized
+        return normalize_backend_report({
+            "summary": "Stopped after reaching the maximum backend tool steps.",
+            "commands_run": tracker["commands_run"],
+            "files_read": sorted(tracker["files_read"]),
+            "files_changed": sorted(tracker["files_changed"]),
+            "needs_approval": False,
+            "risks": ["Backend step limit reached before completion."],
+        })
+
+    def synthesize_discovery_report(self, contract, tracker):
+        """Give a small model one bounded, tool-free evidence synthesis job."""
+        evidence = tracker.get("evidence") or []
+        if not evidence:
+            return None
+        messages = [
             {
-                "summary": "Stopped after reaching the maximum backend tool steps.",
-                "commands_run": tracker["commands_run"],
-                "files_read": sorted(tracker["files_read"]),
-                "files_changed": sorted(tracker["files_changed"]),
-                "needs_approval": False,
-                "risks": ["Backend step limit reached before completion."],
-            }
-        )
+                "role": "system",
+                "content": textwrap.dedent(
+                    """\
+                    You synthesize repository evidence already collected by another pass.
+                    Do not request tools. Do not guess beyond the evidence. Distinguish README claims
+                    from implementation confirmed in source. Cite repo-relative paths in findings.
+                    Open questions are uncertainties, not defects or improvement recommendations.
+
+                    Return exactly one JSON object:
+                    {
+                      "summary": "direct answer to the user's question",
+                      "findings": ["file-grounded finding"],
+                      "risks": ["actual evidence limitation"],
+                      "confidence": "high|medium|low",
+                      "open_questions": ["unresolved factual question"],
+                      "suggested_deeper_scope": ["specific area worth more inspection"],
+                      "needs_clarification": false,
+                      "clarifying_question": ""
+                    }
+                    """
+                ).strip(),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "goal": contract.get("goal"),
+                        "intent_analysis": contract.get("intent_analysis") or {},
+                        "files_read": sorted(tracker.get("files_read") or []),
+                        "evidence": evidence,
+                    },
+                    ensure_ascii=False,
+                ),
+            },
+        ]
+        try:
+            raw = self.provider.assess(self.model, messages)
+            report = normalize_backend_report(raw, fallback_message="")
+        except Exception as exc:  # noqa: BLE001
+            self.trace_print(f"dedicated discovery synthesis failed: {exc}")
+            return None
+        if not report.get("summary"):
+            return None
+        report["commands_run"] = tracker["commands_run"]
+        report["files_read"] = sorted(tracker["files_read"])
+        report["files_changed"] = sorted(tracker["files_changed"])
+        return report
 
     def run_contract_with_model(self, contract, memory_text, model):
         original = self.model
@@ -1159,6 +1285,7 @@ class LocalPartner:
         # to stdout itself (it would corrupt the full-screen app).
         self.stream_to_stdout = True
         self.pending_plan = None
+        self.pending_discovery = None
         self.latest_plan = None
         self.last_report = None
         self.last_status = None
@@ -1398,13 +1525,48 @@ class LocalPartner:
         ) and not self.wants_edit(prompt)
 
     def wants_project_discovery(self, prompt):
-        return bool(
-            re.search(
-                r"\b(what is this project|what can you tell me about this project|tell me about (?:this )?(?:repo|repository|project|codebase)|analy[sz]e (?:this )?(?:repo|repository|project|codebase)|figure out what this (?:does|is)|review the structure|understand this codebase|read key files until (?:you )?know what this is)\b",
+        discovery_re = re.compile(
+            r"\b(what is this project|what can you tell me about this project|tell me about (?:this )?(?:repo|repository|project|codebase)|analy[sz]e (?:this )?(?:repo|repository|project|codebase)|figure out what this (?:does|is)|review the structure|understand this codebase|read key files until (?:you )?know what this is)\b",
+            re.I,
+        )
+        if discovery_re.search(prompt):
+            return True
+
+        # Treat questions naming the current project as repo questions rather
+        # than general-knowledge chat. This keeps "What is Skald?" grounded in
+        # the checked-out repository even when the project name is not followed
+        # by the word "project".
+        names = {Path(self.workdir).name.lower()}
+        package_path = Path(self.workdir) / "package.json"
+        try:
+            package = json.loads(package_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            package = {}
+        for value in (package.get("name"), (package.get("build") or {}).get("productName")):
+            if isinstance(value, str) and value.strip():
+                names.add(value.strip().lower())
+        for name in names:
+            if re.search(
+                rf"\b(?:what is|what does|tell me about|explain)\s+(?:the\s+)?{re.escape(name)}\b",
                 prompt,
                 re.I,
-            )
+            ):
+                return True
+
+        # Resolve short follow-ups such as "what does it do?" against the last
+        # user turn when that turn was explicitly about discovering the repo.
+        follow_up = re.search(
+            r"^\s*(?:ok(?:ay)?[, ]*)?(?:but\s+)?(?:what is (?:it|this)|what does (?:it|this) do|what is the (?:project|app)|tell me more)\??\s*$",
+            prompt,
+            re.I,
         )
+        if follow_up:
+            previous_user = next(
+                (item.get("content", "") for item in reversed(self.history) if item.get("role") == "user"),
+                "",
+            )
+            return bool(discovery_re.search(previous_user))
+        return False
 
     def classify_contract(self, prompt, planning=False):
         state = inspect_workdir_state(self.workdir)
@@ -1495,6 +1657,20 @@ class LocalPartner:
         messages.extend(self.history)
         messages.append({"role": "user", "content": original_prompt})
         messages.append({"role": "user", "content": (("Context to preserve:\n" + frontend_message + "\n\n") if frontend_message else "") + "Backend report:\n" + json.dumps(backend_report, ensure_ascii=False, indent=2)})
+        if (backend_report or {}).get("grounding_evidence"):
+            messages.append({
+                "role": "user",
+                "content": (
+                    "This is a repository-discovery answer. The backend report came from AI-led tool exploration; "
+                    "grounding_evidence is a deterministic verification layer. Synthesize a direct answer to the "
+                    "user's actual question, cite the key repo-relative files that support it, preserve confidence "
+                    "and open questions, and do not invent claims that conflict with grounding_evidence. Do not "
+                    "emit a generic project-overview template. If grounding_corrections is present, explicitly fix "
+                    "every listed issue and do not repeat the contradicted claim. Do not recommend reading files "
+                    "that already appear in files_read. Treat open questions as uncertainty, not evidence of defects; "
+                    "do not suggest improvements unless a finding identifies a concrete problem."
+                ),
+            })
         status = str((backend_report or {}).get("execution_status") or "")
         if status and status != "applied":
             if status == "partially_applied":
@@ -1833,23 +2009,103 @@ class LocalPartner:
         self.log_run(user_prompt, reply, contract=contract, report=report)
         return reply
 
-    def run_project_discovery_turn(self, user_prompt):
+    def _project_grounding_evidence(self, budget):
+        """Build compact deterministic evidence used only to verify AI output."""
+        profile = build_project_profile(self.workdir, budget)
+        entrypoint_roles = {}
+        role_candidates = {
+            "src/main.tsx": "React renderer entrypoint",
+            "src/main.jsx": "React renderer entrypoint",
+            "src-main/main.ts": "Electron main-process entrypoint",
+            "src-main/main.js": "Electron main-process entrypoint",
+            "src-main/preload.ts": "Electron preload bridge",
+            "src-main/preload.js": "Electron preload bridge",
+            "electron/main.ts": "Electron main-process entrypoint",
+            "electron/preload.ts": "Electron preload bridge",
+        }
+        for path in profile.get("entrypoints") or []:
+            if path in role_candidates:
+                entrypoint_roles[path] = role_candidates[path]
+        return {
+            "project_name": profile.get("display_name") or profile.get("project_name"),
+            "documented_purpose": profile.get("documented_purpose"),
+            "documentation_found": profile.get("documentation_found") or [],
+            "documented_features": profile.get("documented_features") or [],
+            "detected_stack": profile.get("detected_stack") or [],
+            "entrypoints": profile.get("entrypoints") or [],
+            "entrypoint_roles": entrypoint_roles,
+        }
+
+    @staticmethod
+    def _discovery_grounding_issues(reply, evidence):
+        issues = []
+        if (
+            evidence.get("entrypoint_roles", {}).get("src/main.tsx") == "React renderer entrypoint"
+            and re.search(
+                r"src/main\.tsx.{0,120}(?:Electron main(?:-| )process|main entry point for (?:the )?Electron)",
+                reply,
+                re.I | re.S,
+            )
+        ):
+            issues.append("src/main.tsx is the React renderer entrypoint, not the Electron main process; src-main/main.ts is the Electron main-process entrypoint.")
+        if evidence.get("documentation_found") and re.search(r"\b(no|without)\s+(?:public\s+)?documentation\b|\bno\s+README\b", reply, re.I):
+            issues.append("Documentation exists: " + ", ".join(evidence["documentation_found"]))
+        return issues
+
+    @staticmethod
+    def _discovery_followup_question(report, *, depth):
+        confidence = str(report.get("confidence") or "").lower()
+        files_read = report.get("files_read") or []
+        if confidence not in {"high", "medium", "low"}:
+            confidence = "low" if not files_read else "medium" if report.get("risks") else "high"
+            report["confidence"] = confidence
+        if report.get("needs_clarification"):
+            return report.get("clarifying_question") or "Should I inspect the repository more deeply before answering?"
+        scopes = [str(item).strip() for item in (report.get("suggested_deeper_scope") or []) if str(item).strip()]
+        if depth != "deep" and confidence in {"medium", "low"}:
+            target = ", ".join(scopes[:3]) or "the implementation and remaining unclear areas"
+            return f"Should I dig deeper into {target}?"
+        return ""
+
+    @staticmethod
+    def _normalize_discovery_uncertainty(report, evidence):
+        risks = [str(item).strip() for item in (report.get("risks") or []) if str(item).strip()]
+        if evidence.get("documented_purpose"):
+            risks = [
+                item for item in risks
+                if not re.search(r"ambiguity in (?:the )?(?:exact )?definition|exact definition and scope", item, re.I)
+            ]
+        report["risks"] = risks
+        if report.get("confidence") == "high" and (report.get("open_questions") or risks):
+            report["confidence"] = "medium"
+        return report
+
+    def run_project_discovery_turn(self, user_prompt, *, depth="standard", prior_report=None, history_prompt=None):
         self.sync_executor()
         self._prune_history()
+        is_deep = depth == "deep" or bool(re.search(r"\b(deep|thorough|detailed)\b", user_prompt, re.I))
         budget = {
             "max_root_files": 50,
-            "max_reads": 20 if re.search(r"\b(deep|thorough|detailed)\b", user_prompt, re.I) else 12,
-            "max_searches": 12 if re.search(r"\b(deep|thorough|detailed)\b", user_prompt, re.I) else 8,
+            "max_reads": 20 if is_deep else 12,
+            "max_searches": 12 if is_deep else 8,
             "max_lines_per_file": 500,
-            "stop_when_confidence": "medium",
+            "stop_when_confidence": "high" if is_deep else "medium",
         }
+        goal = user_prompt.strip()
+        if prior_report:
+            goal = (
+                f"Deepen the previous repository answer to: {user_prompt.strip()}\n"
+                "Resolve its open questions and inspect implementation areas that were not yet read."
+            )
         contract = {
-            "goal": user_prompt.strip(),
+            "goal": goal,
             "scope": ["."],
             "constraints": [
                 "Read-only repo discovery.",
-                "Do not rely on a single project.md file; inspect package, config, docs, and entrypoints.",
-                "Build conclusions from deterministic framework markers before model inference.",
+                "The model must retrieve evidence itself with repository tools.",
+                "Inspect package/config, documentation, runtime entrypoints, and representative feature source.",
+                "Do not stop after identifying the framework; answer what the product does and how the inspected code supports that conclusion.",
+                "Ask a yes/no clarifying question instead of guessing when the user's desired scope is ambiguous.",
             ],
             "commands_allowed": [],
             "approval_prefixes": [],
@@ -1862,16 +2118,78 @@ class LocalPartner:
             "target_paths": [],
             "verification_checks": [],
             "exploration_budget": budget,
+            "exploration_depth": "deep" if is_deep else "standard",
+            "max_tool_steps": 18 if is_deep else 12,
+            "discovery_seed": format_repo_map(self.workdir),
         }
-        self.milestone("mode: read-only inspection")
+        if prior_report:
+            contract["previous_discovery"] = {
+                "summary": prior_report.get("summary", ""),
+                "files_read": prior_report.get("files_read") or [],
+                "open_questions": prior_report.get("open_questions") or [],
+                "suggested_deeper_scope": prior_report.get("suggested_deeper_scope") or [],
+            }
+            contract["constraints"].append("Do not merely repeat the previous answer; inspect additional relevant files.")
+        self.milestone("mode: AI-led repository discovery")
         self.milestone("allowed tools: repo_map, repo_overview, list_files, search_files, read_file")
-        report = self.executor.project_profile_report(contract)
+        report = self._run_backend(contract)
+        relative_reads = []
+        root = Path(self.workdir)
+        for value in report.get("files_read") or []:
+            path = Path(value)
+            try:
+                value = path.resolve().relative_to(root).as_posix() if path.is_absolute() else path.as_posix()
+            except ValueError:
+                value = path.as_posix()
+            if value not in relative_reads:
+                relative_reads.append(value)
+        report["files_read"] = relative_reads
+        report["grounding_evidence"] = self._project_grounding_evidence(budget)
+        self._normalize_discovery_uncertainty(report, report["grounding_evidence"])
         reply = self.frontend_finalize(user_prompt, report)
+        grounding_issues = self._discovery_grounding_issues(reply, report["grounding_evidence"])
+        if grounding_issues:
+            report["grounding_corrections"] = grounding_issues
+            reply = self.frontend_finalize(user_prompt, report)
+        question = self._discovery_followup_question(report, depth="deep" if is_deep else "standard")
+        if question:
+            question = question.rstrip().rstrip("?") + "? Reply yes or no."
+            reply = reply.rstrip() + "\n\n" + question
+            self.pending_discovery = {
+                "original_prompt": user_prompt,
+                "contract": contract,
+                "report": report,
+                "question": question,
+            }
+        else:
+            self.pending_discovery = None
         self.last_report = report
         self.last_status = "completed"
-        self.history.append({"role": "user", "content": user_prompt})
+        turn_prompt = history_prompt or user_prompt
+        self.history.append({"role": "user", "content": turn_prompt})
         self.history.append({"role": "assistant", "content": reply})
-        self.log_run(user_prompt, reply, contract=contract, report=report)
+        self.log_run(turn_prompt, reply, contract=contract, report=report)
+        return reply
+
+    def continue_project_discovery(self):
+        pending = self.pending_discovery
+        if not pending:
+            return None
+        self.pending_discovery = None
+        return self.run_project_discovery_turn(
+            pending["original_prompt"],
+            depth="deep",
+            prior_report=pending["report"],
+            history_prompt="yes",
+        )
+
+    def decline_project_discovery(self):
+        self.pending_discovery = None
+        reply = "Understood. I’ll keep the current answer at this level."
+        self.last_status = "reply"
+        self.history.append({"role": "user", "content": "no"})
+        self.history.append({"role": "assistant", "content": reply})
+        self.log_run("no", reply, status="reply")
         return reply
 
     def _direct_turn(self, user_prompt):
@@ -1900,6 +2218,15 @@ class LocalPartner:
             applied = self.apply_pending_plan()
             if applied is not None:
                 return applied
+        if self.pending_discovery:
+            if PROMPT_YES_RE.fullmatch(user_prompt.strip()):
+                continued = self.continue_project_discovery()
+                if continued is not None:
+                    return continued
+            if re.fullmatch(r"(?i)\s*(?:n|no|nope|stop)\s*[.!]?\s*", user_prompt):
+                return self.decline_project_discovery()
+            # A substantive new prompt supersedes the optional follow-up.
+            self.pending_discovery = None
 
         if not planning and self.wants_project_discovery(user_prompt):
             return self.run_project_discovery_turn(user_prompt)

@@ -34,6 +34,22 @@ def test_status_text_renders(tmp_path):
     assert "mode chat" in text
 
 
+def test_activity_sidebar_disables_horizontal_scrolling(tmp_path):
+    async def inner():
+        app = LocalCodeApp(_partner(tmp_path))
+        async with app.run_test(size=(100, 30)) as pilot:
+            app.activity.write_event({
+                "kind": "tool",
+                "line": "READ " + "/very-long-directory-name" * 12 + "/source-file.ts",
+            })
+            await pilot.pause()
+            log = app.query_one("#activity-log")
+            assert log.styles.overflow_x == "hidden"
+            assert log.max_scroll_x == 0
+
+    asyncio.run(inner())
+
+
 def test_normal_turn_runs_partner_and_clears_busy(tmp_path):
     async def inner():
         partner = _partner(tmp_path)

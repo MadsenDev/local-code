@@ -263,6 +263,7 @@ def render_status(agent):
         ("Raw JSON", "on" if agent.show_raw_actions else "off"),
         ("Tool calling", agent.tool_calling),
         ("Pending plan", "yes" if agent.pending_plan else "no"),
+        ("Pending deeper discovery", "yes" if agent.pending_discovery else "no"),
         ("Context", f"{agent.context_usage().total:,} / {agent.context_limit:,} estimated tokens ({agent.context_usage().percent}%)"),
     ]
     return agent.ui.kv_box("Rist status", rows, color=UI.CYAN)
@@ -286,6 +287,8 @@ def render_final_card(agent):
         parts.append(agent.ui.style("⚠ risks", UI.YELLOW))
     if report.get("needs_approval"):
         parts.append(agent.ui.style("→ type 'yes' to apply", UI.YELLOW))
+    elif agent.pending_discovery:
+        parts.append(agent.ui.style("→ type 'yes' to dig deeper", UI.YELLOW))
     if not parts:
         return ""
     return agent.ui.style("  · " + " · ".join(parts), UI.DIM)
@@ -592,6 +595,7 @@ def interactive_loop(agent):
         if prompt == "/clear":
             agent.history.clear()
             agent.pending_plan = None
+            agent.pending_discovery = None
             clear_chat_history(agent.workdir, agent.storage_mode)
             print("History cleared.")
             continue

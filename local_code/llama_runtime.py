@@ -174,29 +174,51 @@ def _download(url: str, destination: Path, *, sha256: str | None = None, force=F
         raise
 
 
+def _is_runtime_member(name: str) -> bool:
+    """Return whether an archive member is needed to run llama-server."""
+    basename = Path(name).name
+    lowered = basename.lower()
+    return (
+        basename in {"llama-server", "llama-server.exe"}
+        or lowered.endswith((".dll", ".dylib"))
+        or (lowered.startswith("lib") and ".so" in lowered)
+    )
+
+
 def _extract_llama_server(archive: Path, target: Path) -> None:
-    names = []
+    """Extract llama-server and its adjacent shared libraries.
+
+    Official llama.cpp release binaries dynamically load libraries shipped in
+    the same archive. Flattening the required files into the managed bin
+    directory preserves the executable's ``$ORIGIN``/loader-relative lookup.
+    """
+    extracted_server = False
+    target.parent.mkdir(parents=True, exist_ok=True)
     if zipfile.is_zipfile(archive):
         with zipfile.ZipFile(archive) as zf:
-            names = zf.namelist()
-            member = next((name for name in names if Path(name).name in {"llama-server", "llama-server.exe"}), None)
-            if member:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                with zf.open(member) as src, target.open("wb") as dst:
+            for member in zf.infolist():
+                if member.is_dir() or not _is_runtime_member(member.filename):
+                    continue
+                destination = target if Path(member.filename).name in {"llama-server", "llama-server.exe"} else target.parent / Path(member.filename).name
+                with zf.open(member) as src, destination.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
-                return
+                extracted_server |= destination == target
+        if extracted_server:
+            return
     if tarfile.is_tarfile(archive):
         with tarfile.open(archive) as tf:
-            names = tf.getnames()
-            member = next((m for m in tf.getmembers() if Path(m.name).name in {"llama-server", "llama-server.exe"} and m.isfile()), None)
-            if member:
-                target.parent.mkdir(parents=True, exist_ok=True)
+            for member in tf.getmembers():
+                if not (member.isfile() or member.islnk() or member.issym()) or not _is_runtime_member(member.name):
+                    continue
                 src = tf.extractfile(member)
                 if src is None:
-                    raise FileNotFoundError("llama-server was not readable in the runtime archive.")
-                with src, target.open("wb") as dst:
+                    raise FileNotFoundError(f"Runtime archive member was not readable: {member.name}")
+                destination = target if Path(member.name).name in {"llama-server", "llama-server.exe"} else target.parent / Path(member.name).name
+                with src, destination.open("wb") as dst:
                     shutil.copyfileobj(src, dst)
-                return
+                extracted_server |= destination == target
+        if extracted_server:
+            return
     raise FileNotFoundError("The runtime archive did not contain llama-server.")
 
 

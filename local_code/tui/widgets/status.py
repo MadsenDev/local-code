@@ -8,12 +8,13 @@ def render_status_text(partner, busy: bool, runtime_task: str | None = None) -> 
 
     models = partner.frontend_model if partner.frontend_model == partner.backend_model else f"{partner.frontend_model}→{partner.backend_model}"
     pending = "Pending Review" if partner.pending_plan else "clear"
+    discovery = "deeper?" if partner.pending_discovery else "clear"
     state = "busy" if busy else "idle"
     runtime_state = f"runtime task running: {runtime_task}" if runtime_task else "runtime idle"
     return (
         f"[b]{partner.provider.name}[/b] | {models} | {state} | {runtime_state} | mode {partner.mode} | "
         f"routing {partner.routing_decision.get('mode', partner.model_routing)} | "
-        f"permissions e:{partner.edit_permission}/c:{partner.command_permission} | plan:{pending}"
+        f"permissions e:{partner.edit_permission}/c:{partner.command_permission} | plan:{pending} | discovery:{discovery}"
     )
 
 

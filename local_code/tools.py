@@ -65,6 +65,10 @@ ENTRYPOINTS = (
     "electron/main.js",
     "electron/preload.ts",
     "electron/preload.js",
+    "src-main/main.ts",
+    "src-main/main.js",
+    "src-main/preload.ts",
+    "src-main/preload.js",
 )
 SEMANTIC_SOURCE_FILES = (
     "src/App.tsx",
@@ -75,6 +79,8 @@ SEMANTIC_SOURCE_FILES = (
     "src-tauri/src/commands.rs",
     "src-tauri/src/workspace.rs",
     "src-tauri/src/lib.rs",
+    "src-main/persist.ts",
+    "src-main/vault.ts",
 )
 ARCHITECTURE_DIRS = (
     "docs",
@@ -85,6 +91,7 @@ ARCHITECTURE_DIRS = (
     "src/hooks",
     "src/services",
     "electron",
+    "src-main",
     "src-tauri",
 )
 
@@ -264,6 +271,40 @@ def _read_text_prefix(path, max_lines):
     return "\n".join(lines[:max_lines])
 
 
+def _clean_markdown_line(line):
+    text = line.strip().lstrip("> ").strip()
+    text = re.sub(r"!\[[^]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", text)
+    return text.strip("*_` ")
+
+
+def _readme_identity(text):
+    """Extract a display name, purpose sentence, and feature headings."""
+    display_name = None
+    purpose = None
+    features = []
+    in_features = False
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", stripped)
+        if heading:
+            level = len(heading.group(1))
+            title = _clean_markdown_line(heading.group(2))
+            if level == 1 and not display_name:
+                display_name = title
+            if level == 2:
+                in_features = title.lower() in {"features", "capabilities", "what it does"}
+            elif in_features and level == 3 and title and title not in features:
+                features.append(title)
+            continue
+        if purpose or not stripped or stripped in {"---", "***", "___"} or stripped.startswith("!["):
+            continue
+        cleaned = _clean_markdown_line(stripped)
+        if len(cleaned) >= 12 and not cleaned.startswith(("[!", "<")):
+            purpose = cleaned
+    return display_name, purpose, features
+
+
 def _confidence_from_counts(confirmed, likely=0):
     if confirmed >= 3:
         return "high"
@@ -425,6 +466,9 @@ def build_project_profile(workdir, budget=None):
     root = Path(workdir).resolve()
     profile = {
         "project_name": None,
+        "display_name": None,
+        "documented_purpose": None,
+        "documented_features": [],
         "detected_stack": [],
         "frontend": [],
         "backend": [],
@@ -452,27 +496,33 @@ def build_project_profile(workdir, budget=None):
         return profile
 
     reads_remaining = int(budget["max_reads"])
+    read_cache = {}
 
     def note_read(rel_path):
         nonlocal reads_remaining
         path = root / rel_path
+        rel = rel_path.as_posix() if isinstance(rel_path, Path) else str(rel_path)
+        if rel in read_cache:
+            return read_cache[rel]
         if reads_remaining <= 0 or not path.exists() or not path.is_file():
             return ""
         reads_remaining -= 1
-        rel = rel_path.as_posix() if isinstance(rel_path, Path) else str(rel_path)
         if rel not in profile["files_read"]:
             profile["files_read"].append(rel)
-        return _read_text_prefix(path, int(budget["max_lines_per_file"]))
+        read_cache[rel] = _read_text_prefix(path, int(budget["max_lines_per_file"]))
+        return read_cache[rel]
 
     for doc in DOC_FILES:
         if (root / doc).is_file():
             profile["documentation_found"].append(doc)
             text = note_read(doc)
-            for line in text.splitlines():
-                stripped = line.strip("# ").strip()
-                if stripped and len(stripped) > 4:
-                    profile["purpose_clues"].append(f"{doc}: {stripped[:180]}")
-                    break
+            if doc == "README.md":
+                display_name, purpose, features = _readme_identity(text)
+                profile["display_name"] = display_name
+                profile["documented_purpose"] = purpose
+                profile["documented_features"] = features[:12]
+            if profile.get("documented_purpose"):
+                profile["purpose_clues"].append(f"{doc}: {profile['documented_purpose'][:180]}")
     docs_dir = root / "docs"
     if docs_dir.is_dir():
         profile["documentation_found"].append("docs/")
@@ -489,6 +539,7 @@ def build_project_profile(workdir, budget=None):
             profile["purpose_clues"].append(f"package.json name: {profile['project_name']}")
         if package.get("description"):
             profile["purpose_clues"].append(f"package.json description: {package['description']}")
+            profile["documented_purpose"] = profile.get("documented_purpose") or package["description"]
 
     def add_once(key, value):
         if value not in profile[key]:
@@ -540,10 +591,12 @@ def build_project_profile(workdir, budget=None):
         profile["confirmed"].append("This repo has Tauri desktop markers: " + ", ".join(tauri_markers) + ".")
 
     electron_markers = []
-    if (root / "electron/main.ts").exists() or (root / "electron/main.js").exists():
+    if any((root / path).exists() for path in ("electron/main.ts", "electron/main.js", "src-main/main.ts", "src-main/main.js")):
         electron_markers.append("electron main file")
-    if (root / "electron/preload.ts").exists() or (root / "electron/preload.js").exists():
+    if any((root / path).exists() for path in ("electron/preload.ts", "electron/preload.js", "src-main/preload.ts", "src-main/preload.js")):
         electron_markers.append("electron preload file")
+    if (root / "electron.vite.config.ts").exists() or (root / "electron.vite.config.js").exists():
+        electron_markers.append("electron-vite config")
     if "electron" in deps or "electron-builder" in deps:
         electron_markers.append("electron dependency")
     if "electron" in script_blob:
@@ -701,7 +754,9 @@ def format_project_profile(profile):
     if "Tauri" in profile.get("desktop_runtime", []) and "React" in profile.get("frontend", []):
         overview_parts.append("This appears to be a Tauri desktop app with a React frontend")
     elif profile.get("desktop_runtime"):
-        overview_parts.append(f"This appears to be a {'/'.join(profile['desktop_runtime'])} desktop app")
+        runtime_name = "/".join(profile["desktop_runtime"])
+        article = "an" if runtime_name[:1].lower() in "aeiou" else "a"
+        overview_parts.append(f"This appears to be {article} {runtime_name} desktop app")
     elif profile.get("frontend"):
         overview_parts.append(f"This appears to be a {'/'.join(profile['frontend'])} frontend project")
     elif profile.get("backend"):
@@ -712,7 +767,14 @@ def format_project_profile(profile):
     if purpose_phrase:
         overview_parts[0] += f" {purpose_phrase}"
     name = profile.get("project_name")
-    what_it_is = overview_parts[0] + (f" named `{name}`." if name else ".")
+    display_name = profile.get("display_name") or name
+    purpose = profile.get("documented_purpose")
+    if purpose and display_name:
+        what_it_is = f"{display_name}: {purpose.rstrip('.')}. {overview_parts[0]}."
+    elif purpose:
+        what_it_is = f"{purpose.rstrip('.')}. {overview_parts[0]}."
+    else:
+        what_it_is = overview_parts[0] + (f" named `{name}`." if name else ".")
 
     return "\n".join(
         [
@@ -726,6 +788,9 @@ def format_project_profile(profile):
             "",
             "### Likely",
             lines(profile.get("likely") or []),
+            "",
+            "### Documented capabilities",
+            lines(profile.get("documented_features") or []),
             "",
             "### Confirmed stack",
             f"- Frontend: {', '.join(profile.get('frontend') or ['unclear'])}",

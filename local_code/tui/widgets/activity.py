@@ -12,7 +12,10 @@ class ActivityTimeline(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Label("Activity", classes="panel-title")
-        yield RichLog(id="activity-log", wrap=True, markup=True, highlight=False)
+        # RichLog defaults to a 78-column minimum render width, which forces a
+        # horizontal scroll range inside this 28–48 column sidebar even when
+        # wrapping is enabled.
+        yield RichLog(id="activity-log", min_width=1, wrap=True, markup=True, highlight=False)
 
     @property
     def log(self) -> RichLog:

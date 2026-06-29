@@ -59,6 +59,9 @@ Screen {
 }
 
 #activity-log {
+    width: 100%;
+    max-width: 100%;
+    overflow-x: hidden;
     scrollbar-size: 1 1;
 }
 

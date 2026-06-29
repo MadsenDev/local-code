@@ -123,8 +123,8 @@ def build_commands() -> list[Command]:
     def reject_pending(app):
         app._review_dismissed("reject")
 
-    add(id="conversation.new", title="New conversation", subtitle="Start a fresh conversation", category="Conversation", keywords=("reset",), callback=lambda app: (app.partner.history.clear(), setattr(app.partner, "pending_plan", None), app.conversation.clear(), app.conversation.write_welcome(app.partner.mode), app._refresh_status()))
-    add(id="conversation.clear", title="Clear conversation", subtitle="Clear the visible transcript", category="Conversation", keywords=("history",), callback=lambda app: (app.partner.history.clear(), setattr(app.partner, "pending_plan", None), app.conversation.clear(), app._refresh_status()))
+    add(id="conversation.new", title="New conversation", subtitle="Start a fresh conversation", category="Conversation", keywords=("reset",), callback=lambda app: (app.partner.history.clear(), setattr(app.partner, "pending_plan", None), setattr(app.partner, "pending_discovery", None), app.conversation.clear(), app.conversation.write_welcome(app.partner.mode), app._refresh_status()))
+    add(id="conversation.clear", title="Clear conversation", subtitle="Clear the visible transcript", category="Conversation", keywords=("history",), callback=lambda app: (app.partner.history.clear(), setattr(app.partner, "pending_plan", None), setattr(app.partner, "pending_discovery", None), app.conversation.clear(), app._refresh_status()))
     add(id="conversation.copy_last", title="Copy last response", subtitle="Copy the latest assistant response", category="Conversation", keywords=("clipboard",), callback=lambda app: app._copy_last_response())
     add(id="conversation.help", title="Show help", subtitle="Show available slash commands and keys", category="Conversation", keywords=("docs",), callback=lambda app: app.conversation.log.write(Panel(Markdown(app.HELP_TEXT), title="help", border_style="cyan")))
 

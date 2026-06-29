@@ -155,6 +155,55 @@ Here's the delegation contract:
 
 
 class TestRoutingAndFailures:
+    def test_repo_discovery_with_file_hints_still_uses_tool_loop(self, monkeypatch, tmp_path):
+        (tmp_path / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+        agent = LocalCodeAgent(
+            model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+        )
+        actions = iter([
+            ({"tool": "read_file", "args": {"path": "package.json", "start": 1, "end": 100}}, "read"),
+            ({"tool": "final", "args": {"summary": "Demo package", "confidence": "high"}}, "final"),
+        ])
+        monkeypatch.setattr(agent, "request_action", lambda messages, contract: next(actions))
+
+        report = agent.run_contract({
+            "goal": "What is Demo?",
+            "task_kind": "repo_discovery",
+            "edit_policy": "inspect",
+            "read_only": True,
+            "files_of_interest": ["package.json"],
+            "max_tool_steps": 1,
+        }, "")
+
+        assert report["summary"] == "Demo package"
+        assert report["confidence"] == "high"
+        assert report["files_read"] == [str((tmp_path / "package.json").resolve())]
+
+    def test_discovery_grounding_detects_wrong_entrypoint_role(self):
+        issues = LocalPartner._discovery_grounding_issues(
+            "src/main.tsx is the main entry point for the Electron app.",
+            {
+                "entrypoint_roles": {"src/main.tsx": "React renderer entrypoint"},
+                "documentation_found": ["README.md"],
+            },
+        )
+        assert issues and "React renderer" in issues[0]
+
+    def test_documented_purpose_removes_vacuous_definition_risk(self):
+        report = {
+            "confidence": "high",
+            "risks": ["Ambiguity in the definition of 'Skald'"],
+            "open_questions": [],
+        }
+        LocalPartner._normalize_discovery_uncertainty(report, {"documented_purpose": "A Markdown workspace"})
+        assert report["risks"] == []
+        assert report["confidence"] == "high"
+
     def test_hybrid_bootstrap_executes_in_empty_directory(self, monkeypatch, tmp_path):
         partner = LocalPartner(
             frontend_model="test",
@@ -208,7 +257,7 @@ class TestRoutingAndFailures:
         assert seen["contract"]["task_kind"] == "inspection"
         assert seen["contract"]["edit_policy"] == "inspect"
 
-    def test_project_discovery_uses_deterministic_read_only_profile(self, monkeypatch, tmp_path):
+    def test_project_discovery_uses_ai_led_read_only_contract(self, monkeypatch, tmp_path):
         (tmp_path / "package.json").write_text(
             '{"name":"desktop-tool","scripts":{"dev":"vite","tauri":"tauri dev"},"dependencies":{"@tauri-apps/api":"1.0.0","react":"18.0.0","react-dom":"18.0.0"},"devDependencies":{"vite":"5.0.0"}}',
             encoding="utf-8",
@@ -227,17 +276,132 @@ class TestRoutingAndFailures:
             verbosity="quiet",
             mode="hybrid",
         )
-        # frontend_finalize makes an LLM call; stub it to return the structured summary so
-        # the test can verify the heuristic profile was built correctly without a live model.
+        seen = {}
+        def fake_backend(contract):
+            seen.update(contract)
+            return {
+                "summary": "This is a Tauri desktop app with React.",
+                "findings": ["package.json confirms Tauri and React"],
+                "files_read": ["package.json", "src/main.tsx", "src-tauri/tauri.conf.json"],
+                "files_changed": [],
+                "confidence": "high",
+            }
+        monkeypatch.setattr(partner, "_run_backend", fake_backend)
         monkeypatch.setattr(partner, "frontend_finalize", lambda prompt, report, **kw: report["summary"])
 
         reply = partner.run_turn("Without making edits, what can you tell me about this project?")
 
-        assert "## Project overview" in reply
+        assert "Tauri desktop app" in reply
         assert "Tauri" in reply
         assert "React" in reply
+        assert seen["task_kind"] == "repo_discovery"
+        assert "repository tools" in " ".join(seen["constraints"])
+        assert seen["discovery_seed"]
         assert partner.last_report["files_changed"] == []
         assert partner.latest_plan is None
+
+    def test_project_name_question_routes_to_grounded_discovery(self, monkeypatch, tmp_path):
+        (tmp_path / "README.md").write_text(
+            "# Skald\n\nA local-first Markdown workspace for plain-text notes.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "package.json").write_text(
+            '{"name":"skald","description":"Local-first Markdown workspace","scripts":{"dev":"electron-vite dev"},"devDependencies":{"electron":"33.0.0","vite":"5.0.0"}}',
+            encoding="utf-8",
+        )
+        partner = LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            command_permission="deny",
+            edit_permission="deny",
+            verbosity="quiet",
+            mode="hybrid",
+        )
+        monkeypatch.setattr(partner, "_run_backend", lambda contract: {
+            "summary": "Skald is a local-first Markdown workspace.",
+            "files_read": ["README.md", "package.json"],
+            "files_changed": [],
+            "confidence": "high",
+        })
+        monkeypatch.setattr(partner, "frontend_finalize", lambda prompt, report, **kw: report["summary"])
+
+        reply = partner.run_turn("Ok, but what is Skald?")
+
+        assert "local-first Markdown workspace" in reply
+        assert "private project" not in reply
+        assert partner.last_report["files_read"][:2] == ["README.md", "package.json"]
+
+    def test_uncertain_discovery_offers_and_applies_yes_no_deepening(self, monkeypatch, tmp_path):
+        (tmp_path / "README.md").write_text("# Demo\n\nA demo application.\n", encoding="utf-8")
+        (tmp_path / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+        partner = LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            verbosity="quiet",
+            mode="hybrid",
+        )
+        contracts = []
+        reports = iter([
+            {
+                "summary": "Demo is an application.",
+                "files_read": ["README.md", "package.json"],
+                "files_changed": [],
+                "confidence": "medium",
+                "open_questions": ["How persistence works"],
+                "suggested_deeper_scope": ["persistence", "runtime entrypoints"],
+            },
+            {
+                "summary": "Demo persists data through src/store.ts.",
+                "files_read": ["src/store.ts"],
+                "files_changed": [],
+                "confidence": "high",
+            },
+        ])
+        def fake_backend(contract):
+            contracts.append(contract)
+            return next(reports)
+        monkeypatch.setattr(partner, "_run_backend", fake_backend)
+        monkeypatch.setattr(partner, "frontend_finalize", lambda prompt, report, **kw: report["summary"])
+
+        first = partner.run_turn("What is Demo?")
+        assert "Should I dig deeper into persistence, runtime entrypoints? Reply yes or no." in first
+        assert partner.pending_discovery is not None
+
+        second = partner.run_turn("yes")
+        assert second == "Demo persists data through src/store.ts."
+        assert contracts[1]["exploration_depth"] == "deep"
+        assert contracts[1]["previous_discovery"]["open_questions"] == ["How persistence works"]
+        assert partner.pending_discovery is None
+
+    def test_uncertain_discovery_no_stops_at_current_answer(self, monkeypatch, tmp_path):
+        (tmp_path / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+        partner = LocalPartner(frontend_model="test", backend_model="test", ollama="http://localhost:11434", workdir=str(tmp_path), verbosity="quiet", mode="hybrid")
+        partner.pending_discovery = {"original_prompt": "What is Demo?", "report": {}, "contract": {}}
+
+        assert "keep the current answer" in partner.run_turn("no")
+        assert partner.pending_discovery is None
+
+    def test_short_followup_reuses_project_discovery_route(self, tmp_path):
+        (tmp_path / "README.md").write_text("# Demo\n\nA desktop project tracker.\n", encoding="utf-8")
+        (tmp_path / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+        partner = LocalPartner(
+            frontend_model="test",
+            backend_model="test",
+            ollama="http://localhost:11434",
+            workdir=str(tmp_path),
+            verbosity="quiet",
+            mode="hybrid",
+        )
+        partner.history = [
+            {"role": "user", "content": "What is this project?"},
+            {"role": "assistant", "content": "It appears to be a desktop project."},
+        ]
+
+        assert partner.wants_project_discovery("What does it do?") is True
 
     def test_read_only_prompt_forces_inspect_policy_even_with_modify_word(self, monkeypatch, tmp_path):
         partner = LocalPartner(

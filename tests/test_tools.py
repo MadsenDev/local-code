@@ -82,6 +82,43 @@ class TestFileOps:
 
 
 class TestRepoDiscovery:
+    def test_preserves_readme_purpose_features_and_src_main_architecture(self, tmp_path):
+        write_file(
+            str(tmp_path),
+            "README.md",
+            """# Skald
+
+**A local-first Markdown workspace for people who think in plain text.**
+
+## Features
+
+### Editor
+Write Markdown with wikilinks.
+
+### Knowledge Graph
+Explore connected notes.
+""",
+        )
+        write_file(
+            str(tmp_path),
+            "package.json",
+            '{"name":"skald","description":"Local-first Markdown workspace","main":"out/main/index.js","scripts":{"dev":"electron-vite dev"},"dependencies":{"react":"18.0.0"},"devDependencies":{"electron":"33.0.0","vite":"5.0.0"}}',
+        )
+        write_file(str(tmp_path), "src/main.tsx", "import React from 'react'\n")
+        write_file(str(tmp_path), "src-main/main.ts", "import { app } from 'electron'\n")
+        write_file(str(tmp_path), "src-main/preload.ts", "export {}\n")
+
+        profile = build_project_profile(str(tmp_path))
+        rendered = format_project_profile(profile)
+
+        assert profile["documented_purpose"] == "A local-first Markdown workspace for people who think in plain text."
+        assert profile["documented_features"] == ["Editor", "Knowledge Graph"]
+        assert "src-main/main.ts" in profile["files_read"]
+        assert "src-main/preload.ts" in profile["files_read"]
+        assert "Skald: A local-first Markdown workspace" in rendered
+        assert "### Documented capabilities\n- Editor\n- Knowledge Graph" in rendered
+        assert "Electron" in profile["desktop_runtime"]
+
     def test_detects_tauri_react_vite(self, tmp_path):
         write_file(
             str(tmp_path),

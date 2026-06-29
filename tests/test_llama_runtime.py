@@ -1,4 +1,7 @@
 import json
+import io
+import tarfile
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -54,6 +57,33 @@ def test_download_rejects_bad_checksum_and_cleans_partial(tmp_path, monkeypatch)
     with pytest.raises(ValueError, match="SHA-256 mismatch"):
         runtime.install_model("qwen36", source.as_uri(), sha256="0" * 64)
     assert not list((tmp_path / "home").rglob("*.part"))
+
+
+@pytest.mark.parametrize("archive_type", ["zip", "tar"])
+def test_runtime_archive_extracts_server_and_shared_libraries(tmp_path, archive_type):
+    archive = tmp_path / ("runtime.zip" if archive_type == "zip" else "runtime.tar.gz")
+    files = {
+        "llama-build/llama-server": b"server",
+        "llama-build/libllama.so.0": b"library",
+        "llama-build/llama-cli": b"unneeded",
+    }
+    if archive_type == "zip":
+        with zipfile.ZipFile(archive, "w") as zf:
+            for name, contents in files.items():
+                zf.writestr(name, contents)
+    else:
+        with tarfile.open(archive, "w:gz") as tf:
+            for name, contents in files.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(contents)
+                tf.addfile(info, io.BytesIO(contents))
+
+    target = tmp_path / "bin" / "llama-server"
+    runtime._extract_llama_server(archive, target)
+
+    assert target.read_bytes() == b"server"
+    assert (target.parent / "libllama.so.0").read_bytes() == b"library"
+    assert not (target.parent / "llama-cli").exists()
 
 
 def test_start_records_external_process_and_waits_for_health(tmp_path, monkeypatch):

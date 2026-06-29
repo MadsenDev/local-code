@@ -137,6 +137,7 @@ class LocalCodeApp(App):
         if cmd == "/clear":
             self.partner.history.clear()
             self.partner.pending_plan = None
+            self.partner.pending_discovery = None
             self.conversation.clear()
             self._refresh_status()
             return True

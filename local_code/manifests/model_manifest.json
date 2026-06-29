@@ -4,12 +4,12 @@
     "qwen2.5-coder-7b": [
       {
         "id": "qwen2.5-coder-7b",
-        "version": "1.0",
+        "version": "13fb94bfda8c8cf22497dc57b78f391a9acb426a",
         "platform": "any",
         "architecture": "any",
-        "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-        "sha256": "3333333333333333333333333333333333333333333333333333333333333333",
-        "size": 5200000000,
+        "url": "https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/13fb94bfda8c8cf22497dc57b78f391a9acb426a/qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        "sha256": "509287f78cb4d4cf6b3843734733b914b2c158e43e22a7f4bf5e963800894d3c",
+        "size": 4683073536,
         "display_name": "Qwen2.5 Coder 7B Instruct",
         "description": "Recommended local coding model for Rist managed setup.",
         "license": "Apache-2.0",
