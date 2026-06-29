@@ -12,6 +12,8 @@ from textual.widgets import Footer, Input, Label, Static
 from local_code.hardware import detect_hardware
 from local_code.routing import resolve_model_routing
 
+from .commands import build_commands
+from .screens.command_palette import CommandPaletteScreen
 from .screens.confirm import ConfirmScreen
 from .widgets.activity import ActivityTimeline
 from .widgets.conversation import ConversationView
@@ -36,11 +38,14 @@ class LocalCodeApp(App):
     """Purpose-built Rist cockpit preserving the existing agent behavior."""
 
     CSS_PATH = "styles/rist.tcss"
+    HELP_TEXT = HELP
 
     BINDINGS = [
         Binding("ctrl+c", "quit", "Quit", priority=True),
         Binding("ctrl+l", "clear_log", "Clear"),
         Binding("ctrl+x", "cancel_turn", "Cancel", show=True),
+        Binding("ctrl+k", "open_palette", "Commands", show=True, priority=True),
+        Binding("ctrl+shift+p", "open_palette", "Commands", show=False, priority=True),
     ]
 
     def __init__(self, partner):
@@ -48,6 +53,7 @@ class LocalCodeApp(App):
         self.partner = partner
         self._live_text = ""
         self._busy = False
+        self.commands = build_commands()
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -136,16 +142,7 @@ class LocalCodeApp(App):
                 self.conversation.log.write(Text(str(exc), style="yellow"))
             return True
         if cmd == "/context":
-            usage = self.partner.context_usage()
-            body = "\n".join([
-                f"Conversation: {usage.conversation:,}",
-                f"Memory: {usage.memory:,}",
-                f"Repo: {usage.repo:,}",
-                f"Tools: {usage.tools:,}",
-                f"Other: {usage.other:,}",
-                f"Total: {usage.total:,} / {usage.limit:,} ({usage.percent}%)",
-            ])
-            self.conversation.log.write(Panel(Text(body), title="context", border_style="cyan"))
+            self._show_context_usage()
             return True
         if cmd == "/routing" and arg in {"single", "adaptive", "dual"}:
             p = self.partner
@@ -195,6 +192,32 @@ class LocalCodeApp(App):
             return True
         self.conversation.log.write(Text(f"Unknown or incomplete command: {text}", style="yellow"))
         return True
+
+
+    def _show_context_usage(self) -> None:
+        usage = self.partner.context_usage()
+        body = "\n".join([
+            f"Conversation: {usage.conversation:,}",
+            f"Memory: {usage.memory:,}",
+            f"Repo: {usage.repo:,}",
+            f"Tools: {usage.tools:,}",
+            f"Other: {usage.other:,}",
+            f"Total: {usage.total:,} / {usage.limit:,} ({usage.percent}%)",
+        ])
+        self.conversation.log.write(Panel(Text(body), title="context", border_style="cyan"))
+
+    def _write_command_event(self, title: str) -> None:
+        self.activity.write_event({"kind": "command", "title": title})
+
+    def execute_palette_command(self, command) -> None:
+        self._write_command_event(command.title)
+        try:
+            command.callback(self)
+        except Exception as exc:  # noqa: BLE001
+            self.conversation.write_tool_summary(Text(str(exc), style="red"), title="command error", style="red")
+        finally:
+            self._refresh_status()
+            self.input.focus()
 
     def _copy_last_response(self) -> None:
         import subprocess as _sp
@@ -297,6 +320,7 @@ class LocalCodeApp(App):
         self.partner.observer = None
         self.partner.confirm_hook = None
         self._busy = False
+        self.commands = build_commands()
         inp = self.input
         inp.disabled = False
         inp.focus()
@@ -326,6 +350,15 @@ class LocalCodeApp(App):
             self.activity.write_note(" · ".join(bits), title="REPORT", style="bright_black")
 
     # -- actions --------------------------------------------------------
+    def action_open_palette(self) -> None:
+        if self._busy:
+            return
+        self.push_screen(CommandPaletteScreen(self.commands, self), self._palette_dismissed)
+
+    def _palette_dismissed(self, command) -> None:
+        if command is not None:
+            self.execute_palette_command(command)
+
     def action_clear_log(self) -> None:
         self.conversation.clear()
         self.activity.clear()
