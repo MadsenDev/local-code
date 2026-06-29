@@ -29,7 +29,7 @@ from .memory import clear_chat_history, save_chat_history
 from .intelligence import DecisionService
 from .intelligence.indexer import format_index_report, index_repository
 from .paths import rist_home
-from .llamacpp import LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile, recommend_gpu_profile, recommend_model_profiles
+from .llamacpp import DEFAULT_LLAMACPP_BASE_URL, LLAMACPP_GPU_PROFILES, format_llama_server_command, generate_llama_server_command, get_llamacpp_profile, recommend_gpu_profile, recommend_model_profiles
 from .llama_runtime import (
     find_llama_server,
     install_llama_server,
@@ -110,6 +110,8 @@ def parse_args():
     )
     parser.add_argument("--model-routing", choices=["single", "adaptive", "dual"], default=DEFAULT_MODEL_ROUTING, help=f"Model residency/routing strategy ({DEFAULT_MODEL_ROUTING})")
     parser.add_argument("--benchmark-runs", type=int, default=3, help="Number of measured benchmark runs per prompt size (3)")
+    parser.add_argument("--start", action="store_true", help="During setup, start the managed llama.cpp runtime after registration")
+    parser.add_argument("--benchmark", action="store_true", help="During setup, run a benchmark after a successful managed start")
     parser.add_argument("--long-context", action="store_true", help="Include an optional long-context benchmark prompt")
     parser.add_argument("--profile", default="qwen2.5-coder-7b", help="llama.cpp command profile")
     parser.add_argument("--gpu", default=None, help="llama.cpp hardware profile")
@@ -1182,11 +1184,45 @@ def _runtime_profile(args):
     return args.model_target or (config.get("llamacpp") or {}).get("profile") or "qwen2.5-coder-7b"
 
 
+def _managed_model_ready(profile_id):
+    try:
+        wanted = get_llamacpp_profile(profile_id)["id"]
+    except ValueError:
+        return False
+    return any(model["id"] == wanted and model.get("exists") for model in list_managed_models())
+
+
+def _try_autostart_managed_llamacpp(args, config):
+    llama_cfg = config.get("llamacpp") or {}
+    profile = llama_cfg.get("profile") or "qwen2.5-coder-7b"
+    if config.get("default_runtime") != "llamacpp" or not _managed_model_ready(profile):
+        return None
+    executable = find_llama_server(args.llama_server or llama_cfg.get("llama_server"))
+    if not executable:
+        return None
+    gpu = args.gpu or llama_cfg.get("gpu_profile") or recommend_gpu_profile(detect_hardware())
+    host = args.host or "127.0.0.1"
+    port = args.port or 8080
+    try:
+        return start_server(profile, gpu, executable=executable, host=host, port=port, wait_timeout=args.wait_timeout)
+    except Exception as exc:  # noqa: BLE001 - surface actionable startup failure to caller
+        args._auto_start_error = {
+            "error": str(exc),
+            "status": server_status(),
+            "log_path": str(managed_log_path()),
+            "profile": profile,
+        }
+        return None
+
+
 def _select_auto_provider(args):
     config = load_runtime_config()
     managed = server_status()
     if managed.get("managed") and managed.get("state") in {"running", "ready"} and (managed.get("health") or {}).get("ready"):
         return "llamacpp", managed.get("base_url") or (config.get("llamacpp") or {}).get("base_url")
+    started = _try_autostart_managed_llamacpp(args, config)
+    if started and (started.get("health") or {}).get("ready"):
+        return "llamacpp", started.get("base_url") or (config.get("llamacpp") or {}).get("base_url")
     llama_base = args.base_url or (config.get("llamacpp") or {}).get("base_url") or DEFAULT_LLAMACPP_BASE_URL
     llama = build_provider("llamacpp", base_url=llama_base, api_key=args.api_key)
     if not hasattr(llama, "available") or llama.available():
@@ -1197,24 +1233,28 @@ def _select_auto_provider(args):
         return "ollama", ollama_base
     return "auto", None
 
-
-def _print_setup_guidance():
+def _run_setup(args):
     hardware = detect_hardware()
-    gpu_profile = recommend_gpu_profile(hardware)
+    gpu_profile = args.gpu or recommend_gpu_profile(hardware)
     recs = recommend_model_profiles(hardware)
+    recommended_profile = recs[0]["id"].replace("-llamacpp", "") if recs else "qwen2.5-coder-7b"
+    profile_id = args.profile or recommended_profile
+    settings = LLAMACPP_GPU_PROFILES[gpu_profile]
+    llama_server = find_llama_server(args.llama_server)
     config = load_runtime_config()
     config["provider"] = "auto"
     config["default_runtime"] = "llamacpp"
     config["model"] = "local"
     config["llamacpp"].update({
-        "profile": recs[0]["id"].replace("-llamacpp", "") if recs else "qwen2.5-coder-7b",
-        "gpu_profile": gpu_profile,
-        "context": LLAMACPP_GPU_PROFILES[gpu_profile]["context"],
-        "batch": LLAMACPP_GPU_PROFILES[gpu_profile]["batch"],
-        "ubatch": LLAMACPP_GPU_PROFILES[gpu_profile]["ubatch"],
-        "threads": min(hardware.cpu_count or 8, LLAMACPP_GPU_PROFILES[gpu_profile]["threads"]),
+        "profile": profile_id, "gpu_profile": gpu_profile, "context": settings["context"],
+        "batch": settings["batch"], "ubatch": settings["ubatch"],
+        "threads": min(hardware.cpu_count or settings["threads"], settings["threads"]),
+        "base_url": f"http://{'127.0.0.1' if args.host in {'0.0.0.0', '::'} else args.host}:{args.port}/v1",
     })
+    if llama_server:
+        config["llamacpp"]["llama_server"] = llama_server
     path = save_runtime_config(config)
+    registered = register_model(profile_id, args.model_path) if args.model_path else None
     print("Rist setup")
     print(f"Detected RAM: {hardware.system_ram_gb or 'unknown'} GB")
     if hardware.gpus:
@@ -1222,19 +1262,42 @@ def _print_setup_guidance():
             print(f"Detected GPU: {gpu.name} ({gpu.vram_total_gb or 'unknown'} GB VRAM)")
     else:
         print("Detected GPU: none (CPU profile selected)")
-    print(f"Runtime: llama.cpp first (GPU profile: {gpu_profile})")
+    print(f"Recommended llama.cpp profile: {profile_id}")
+    print(f"Recommended GPU profile: {gpu_profile}")
     print("Recommended models:")
     for profile in recs:
-        mark = "✓" if profile["status"] == "recommended" else "○"
+        mark = "✓" if profile["id"].replace("-llamacpp", "") == profile_id else "○"
         print(f"  {mark} {profile['name']} — {profile['architecture']}, {profile['role']}, context {profile['recommended_context']}")
-    print("llama-server:", find_llama_server() or "not found yet; install with `rist llama install --url URL` or set LLAMA_SERVER")
+    print("llama-server:", llama_server or "not found; install llama.cpp, pass --llama-server, or set LLAMA_SERVER")
+    if registered:
+        print(f"Registered model: {registered['profile']} -> {registered['path']}")
     print(f"Saved config: {path}")
-    print("Next:")
-    print(f"  rist model register {config['llamacpp']['profile']} --model-path /path/to/model.gguf")
-    print("  rist model start")
+    started = None
+    if args.start:
+        if not _managed_model_ready(profile_id):
+            print("Start skipped: no registered GGUF for the selected profile. Pass --model-path or run `rist model register`.")
+        elif not llama_server:
+            print("Start skipped: llama-server was not found. Pass --llama-server or set LLAMA_SERVER.")
+        else:
+            started = start_server(profile_id, gpu_profile, executable=llama_server, host=args.host, port=args.port, wait_timeout=args.wait_timeout)
+            _print_runtime_report(started, args.json_output)
+            if args.benchmark:
+                provider = build_provider("llamacpp", base_url=started.get("base_url") or config["llamacpp"]["base_url"])
+                report = benchmark_model(provider, "local", runs=args.benchmark_runs, num_ctx=settings["context"], long_context=args.long_context)
+                print(to_json(report) if args.json_output else format_benchmark(report))
+    print("Next actions:")
+    if not _managed_model_ready(profile_id):
+        print(f"  rist model register {profile_id} --model-path /path/to/model.gguf")
+    if not started:
+        print("  rist model start")
     print("  rist")
     return 0
 
+def _print_setup_guidance():
+    class _Args:
+        profile = None; gpu = None; model_path = None; llama_server = None; host = "127.0.0.1"; port = 8080
+        start = False; benchmark = False; benchmark_runs = 3; long_context = False; wait_timeout = 120; json_output = False
+    return _run_setup(_Args())
 
 def _run_llama_tune(args):
     config = load_runtime_config()
@@ -1244,11 +1307,11 @@ def _run_llama_tune(args):
     config["default_runtime"] = "llamacpp"
     config["llamacpp"].update({"gpu_profile": gpu, "context": settings["context"], "batch": settings["batch"], "ubatch": settings["ubatch"], "threads": settings["threads"]})
     path = save_runtime_config(config)
-    print("llama.cpp tuning")
-    print("Saved conservative best-known settings without running a live benchmark.")
+    print("llama.cpp conservative configuration")
+    print("No measured tuning was run; saved conservative profile defaults only.")
     print(f"Profile: {gpu}; context={settings['context']} batch={settings['batch']} ubatch={settings['ubatch']} threads={settings['threads']}")
     print(f"Config: {path}")
-    print("Run `rist benchmark` with the server running for measured TTFT/tokens/sec recommendations.")
+    print("Run `rist benchmark` with the server running to measure TTFT/tokens/sec before calling these settings tuned.")
     return 0
 
 def main():
@@ -1257,7 +1320,7 @@ def main():
     rist_home()
     args = parse_args()
     if args.command == "setup":
-        return _print_setup_guidance()
+        return _run_setup(args)
     if args.command == "decisions":
         return _run_decisions(args)
     if args.command == "chat":
@@ -1300,7 +1363,19 @@ def main():
     if requested_provider == "auto":
         resolved_provider, resolved_base = _select_auto_provider(args)
         if resolved_provider == "auto":
-            sys.stderr.write("No local model runtime is ready. Run `rist setup`, then `rist model register ...` and `rist model start`, or start Ollama.\n")
+            auto_error = getattr(args, "_auto_start_error", None)
+            if auto_error:
+                status = auto_error.get("status") or {}
+                sys.stderr.write("Managed llama.cpp auto-start failed.\n")
+                sys.stderr.write(f"Status: {status.get('state', 'unknown')}\n")
+                sys.stderr.write(f"Log path: {auto_error.get('log_path')}\n")
+                sys.stderr.write(f"Error: {auto_error.get('error')}\n")
+                sys.stderr.write("Next commands:\n")
+                sys.stderr.write("  rist llama logs --tail 50\n")
+                sys.stderr.write("  rist model status\n")
+                sys.stderr.write(f"  rist model start {auto_error.get('profile', '')}\n")
+            else:
+                sys.stderr.write("No local model runtime is ready. Run `rist setup --model-path /path/to/model.gguf --start`, or start Ollama.\n")
             return 1
         args.provider = resolved_provider
         if resolved_provider == "llamacpp" and not args.base_url:

@@ -7,13 +7,12 @@ The old `local-code` command remains available as a temporary compatibility alia
 A local-first AI coding CLI with a full-screen TUI. Uses a two-model
 architecture — a frontend model for conversation/routing and a backend model
 for repo inspection and edits — though both roles default to the same model. It
-runs against a local [Ollama](https://ollama.com) server, an external
-[llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`, or a cloud OpenAI-compatible provider.
+defaults to `provider=auto`: Rist first tries a configured managed [llama.cpp](https://github.com/ggml-org/llama.cpp) `llama-server`, then an external llama.cpp endpoint, then [Ollama](https://ollama.com) for fallback/compatibility, or a cloud OpenAI-compatible provider when selected.
 
 ## Requirements
 
 - Python 3.11+
-- A model provider: [Ollama](https://ollama.com), an external llama.cpp `llama-server`, **or** an OpenRouter/OpenAI API key
+- A model provider: llama.cpp `llama-server` + a GGUF model for the primary local path; Ollama is supported as fallback/compatibility; OpenRouter/OpenAI-compatible APIs are optional cloud providers
 - `rg` (ripgrep) for file search
 - Optional: `delta` for colored diffs, `fzf` for file picker
 
@@ -22,7 +21,30 @@ runs against a local [Ollama](https://ollama.com) server, an external
 ```bash
 # Install with the TUI (recommended) and dev tools
 pip install -e ".[tui,dev]"
+rist setup
+rist
+```
+
+For the zero-friction llama.cpp path, register an existing GGUF during setup and
+start the managed runtime in one step:
+
+```bash
+rist setup --model-path /models/qwen2.5-coder-7b.gguf --start
+rist
+```
+
+`rist setup` detects hardware, recommends a llama.cpp model profile and GPU
+profile, saves persistent config under `~/.rist/config.json`, detects
+`llama-server` from `--llama-server`, `LLAMA_SERVER`, `PATH`, or Rist's runtime
+directory, optionally registers the GGUF passed with `--model-path`, and can
+start the managed llama.cpp runtime with `--start`. It never downloads models or
+binaries unless you explicitly use the existing URL/checksum install commands.
+
+Ollama compatibility path, if you prefer it or already have Ollama running:
+
+```bash
 ollama pull qwen2.5-coder:7b
+rist --provider ollama
 ```
 
 The full-screen TUI is the default interactive experience; if `textual` isn't
@@ -40,7 +62,7 @@ uses `~/.rist/` without overwriting it. Set `RIST_HOME` to use a custom location
 ## Usage
 
 ```bash
-# Default: full-screen TUI, qwen2.5-coder:7b for both roles (recommended on a 12 GB GPU)
+# Default: provider=auto, full-screen TUI, model=local for configured llama.cpp
 rist
 
 # Plain line-based REPL instead of the TUI
@@ -112,8 +134,9 @@ Models are reached through a provider abstraction, selected with `--provider`:
 
 | Provider | Selection | Key |
 |----------|-----------|-----|
-| Ollama (local, default) | `--provider ollama` (default) | none |
-| llama.cpp (external, local) | `--provider llamacpp --model local` | none |
+| Auto (default) | `--provider auto` (default): managed llama.cpp → external llama.cpp → Ollama → setup guidance | none |
+| llama.cpp (managed/external, local primary path) | `--provider llamacpp --model local` | none |
+| Ollama (local fallback/compatibility) | `--provider ollama` | none |
 | OpenRouter | `--provider openrouter --model VENDOR/MODEL` | `OPENROUTER_API_KEY` or `--api-key` |
 | OpenAI / OpenAI-compatible | `--provider openai [--base-url URL] --model MODEL` | `OPENAI_API_KEY` or `--api-key` |
 
@@ -131,8 +154,7 @@ execution. Rist does not link against llama.cpp, parse GGUF files, compile
 llama.cpp, or implement any inference behavior. It can, after an explicit user
 command, discover or download a prebuilt `llama-server`, register or download a
 GGUF, start and stop the external process, monitor health, and connect through
-the OpenAI-compatible HTTP API. Ollama remains supported and is still the
-default.
+the OpenAI-compatible HTTP API. Ollama remains supported as a fallback and compatibility provider, but the default provider is `auto` and the primary local path is llama.cpp.
 
 Install llama.cpp separately by following the upstream project, point
 `LLAMA_SERVER` at an existing executable, or explicitly download a prebuilt
