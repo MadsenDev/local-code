@@ -34,6 +34,8 @@ class ActivityTimeline(Vertical):
             self.log.write(Panel(body, title=str(event.get("title", "TRANSCRIPT")).upper(), title_align="left", border_style="green", padding=(0, 1)))
         elif kind == "trace":
             self.log.write(Panel(Text(str(event.get("text", "")), style="dim"), title="TRACE", title_align="left", border_style="bright_black", padding=(0, 1)))
+        elif kind == "command":
+            self.log.write(Panel(Text(str(event.get("title", "")), style="text-muted"), title="COMMAND", title_align="left", border_style="magenta", padding=(0, 1)))
         self.log.scroll_end(animate=False)
 
     def write_note(self, text: str, title: str = "NOTE", style: str = "yellow") -> None:
