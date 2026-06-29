@@ -4,6 +4,7 @@ from local_code.agent import LocalPartner
 from local_code.providers import OllamaProvider
 from local_code.tui import ConfirmScreen, LocalCodeApp
 from local_code.tui.commands import build_commands, filter_commands
+from local_code.tui.diff_review import ReviewFile, build_review_model, parse_unified_diff, summarize_review
 
 
 def _partner(tmp_path, **kw):
@@ -184,5 +185,75 @@ def test_palette_open_close_with_ctrl_k_and_escape(tmp_path):
             await pilot.press("escape")
             await pilot.pause()
             assert app.screen_stack[-1] is app.screen
+
+    asyncio.run(inner())
+
+
+def _sample_diff():
+    return """diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1,2 +1,3 @@
+ old
++new
+ keep
+-dropped
+diff --git a/local_code/cli.py b/local_code/cli.py
+--- a/local_code/cli.py
++++ b/local_code/cli.py
+@@ -10,0 +11,2 @@
++one
++two
+"""
+
+
+def test_diff_review_model_generation_and_summary(tmp_path):
+    partner = _partner(tmp_path)
+    partner.last_report = {"needs_approval": True, "diff_summary": _sample_diff(), "plan": ["Update docs"]}
+    partner.pending_plan = {"report": partner.last_report, "contract": {}, "original_prompt": "x"}
+    model = build_review_model(partner)
+    assert model is not None
+    assert [file.filename for file in model.files] == ["README.md", "local_code/cli.py"]
+    assert model.summary.files == 2
+    assert model.summary.added == 3
+    assert model.summary.removed == 1
+    assert model.plan == ("Update docs",)
+
+
+def test_diff_summary_parsing_counts_added_removed_lines():
+    files = parse_unified_diff(_sample_diff())
+    assert files[0] == ReviewFile("README.md", 1, 1, files[0].diff)
+    assert files[1].added == 2
+    assert files[1].removed == 0
+    assert summarize_review(files).impact == "Low"
+
+
+def test_palette_pending_proposal_commands_enable_disable(tmp_path):
+    app = LocalCodeApp(_partner(tmp_path))
+    commands = build_commands()
+    assert not any(c.id.startswith("proposal.") for c in filter_commands(commands, "proposal", app))
+    app.partner.pending_plan = {"report": {"needs_approval": True}, "contract": {}, "original_prompt": "x"}
+    ids = {c.id for c in filter_commands(commands, "proposal", app)}
+    assert {"proposal.review", "proposal.apply", "proposal.reject"} <= ids
+
+
+def test_review_apply_and_reject_paths_update_activity_and_status(tmp_path):
+    async def inner():
+        partner = _partner(tmp_path)
+        partner.pending_plan = {"report": {"needs_approval": True}, "contract": {}, "original_prompt": "x"}
+        partner.apply_pending_plan = lambda: setattr(partner, "pending_plan", None) or "applied"
+        app = LocalCodeApp(partner)
+        async with app.run_test() as pilot:
+            app._review_dismissed("reject")
+            await pilot.pause()
+            assert partner.pending_plan is None
+            assert "Proposal rejected" in "".join(strip.text for strip in app.query_one("#activity-log").lines)
+            partner.pending_plan = {"report": {"needs_approval": True}, "contract": {}, "original_prompt": "x"}
+            app._review_dismissed("apply")
+            await _wait_idle(app, pilot)
+            assert partner.pending_plan is None
+            text = "".join(strip.text for strip in app.query_one("#activity-log").lines)
+            assert "Proposal accepted" in text
+            assert "plan:clear" in app.status.render_status(partner, False)
 
     asyncio.run(inner())

@@ -13,8 +13,10 @@ from local_code.hardware import detect_hardware
 from local_code.routing import resolve_model_routing
 
 from .commands import build_commands
+from .diff_review import build_review_model
 from .screens.command_palette import CommandPaletteScreen
 from .screens.confirm import ConfirmScreen
+from .screens.diff_review import DiffReviewScreen
 from .widgets.activity import ActivityTimeline
 from .widgets.conversation import ConversationView
 from .widgets.input import InputBar
@@ -172,8 +174,7 @@ class LocalCodeApp(App):
             if not self.partner.pending_plan:
                 self.conversation.log.write(Text("No pending proposal to apply.", style="yellow"))
                 return True
-            self.conversation.write_user("/apply")
-            self._run_turn("", kind="apply")
+            self._open_review_screen()
             return True
         if cmd == "/ask" and arg:
             self.conversation.write_user(arg)
@@ -192,7 +193,6 @@ class LocalCodeApp(App):
             return True
         self.conversation.log.write(Text(f"Unknown or incomplete command: {text}", style="yellow"))
         return True
-
 
     def _show_context_usage(self) -> None:
         usage = self.partner.context_usage()
@@ -330,15 +330,13 @@ class LocalCodeApp(App):
         report = getattr(self.partner, "last_report", None)
         if not report:
             return
-        log = self.conversation.log
         if report.get("needs_approval"):
-            plan = [s for s in (report.get("plan") or []) if s]
-            if plan:
-                body = "\n".join(f"{i}. {step}" for i, step in enumerate(plan, 1))
-                log.write(Panel(Text(body), title="planned changes", border_style="yellow"))
-            diff = (report.get("diff_summary") or "").strip()
-            if diff and ("---" in diff or "@@" in diff or "+++" in diff):
-                log.write(Panel(Text(diff), title="diff", border_style="yellow"))
+            model = build_review_model(self.partner)
+            if model:
+                self.conversation.write_assistant("Proposal ready. Opened review screen.")
+                self.activity.write_event({"kind": "milestone", "text": "Prepared code changes"})
+                self.activity.write_event({"kind": "diff", "files": model.summary.files, "added": model.summary.added, "removed": model.summary.removed})
+                self.call_later(self._open_review_screen)
         bits = []
         if report.get("files_changed"):
             bits.append(f"{len(report['files_changed'])} edited")
@@ -348,6 +346,26 @@ class LocalCodeApp(App):
             bits.append(f"{len(report['commands_run'])} cmds")
         if bits:
             self.activity.write_note(" · ".join(bits), title="REPORT", style="bright_black")
+
+    def _open_review_screen(self) -> None:
+        model = build_review_model(self.partner)
+        if not model:
+            self.conversation.log.write(Text("No pending proposal to review.", style="yellow"))
+            return
+        self.push_screen(DiffReviewScreen(model), self._review_dismissed)
+
+    def _review_dismissed(self, action) -> None:
+        if action == "apply":
+            self.activity.write_event({"kind": "apply", "text": "Proposal accepted"})
+            self.conversation.write_user("/apply")
+            self._run_turn("", kind="apply")
+        elif action == "reject":
+            self.partner.pending_plan = None
+            self.activity.write_event({"kind": "reject", "text": "Proposal rejected"})
+            self.conversation.write_assistant("Proposal rejected.")
+            self._refresh_status()
+        else:
+            self.input.focus()
 
     # -- actions --------------------------------------------------------
     def action_open_palette(self) -> None:

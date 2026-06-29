@@ -7,7 +7,7 @@ def render_status_text(partner, busy: bool) -> str:
     """Build the structured status line without requiring a mounted widget."""
 
     models = partner.frontend_model if partner.frontend_model == partner.backend_model else f"{partner.frontend_model}→{partner.backend_model}"
-    pending = "pending" if partner.pending_plan else "clear"
+    pending = "Pending Review" if partner.pending_plan else "clear"
     state = "busy" if busy else "idle"
     return (
         f"[b]{partner.provider.name}[/b] | {models} | {state} | mode {partner.mode} | "
