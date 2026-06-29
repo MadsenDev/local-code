@@ -17,8 +17,10 @@ from .diff_review import build_review_model
 from .screens.command_palette import CommandPaletteScreen
 from .screens.confirm import ConfirmScreen
 from .screens.diff_review import DiffReviewScreen
+from .screens.repository_explorer import RepositoryExplorerScreen
 from .screens.runtime_results import BenchmarkResultsScreen, DoctorResultsScreen, RuntimeStatusScreen
 from .tasks import RuntimeTask, run_runtime_task, task_complete_message, task_progress_message, task_title
+from .repository import RepositoryBadge, RepositoryTree
 from .widgets.activity import ActivityTimeline
 from .widgets.conversation import ConversationView
 from .widgets.input import InputBar
@@ -60,6 +62,7 @@ class LocalCodeApp(App):
         self._runtime_task_busy = False
         self._runtime_task_name = None
         self.commands = build_commands()
+        self.repository_tree = RepositoryTree(getattr(partner, "workdir", ".") or ".")
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="topbar"):
@@ -173,6 +176,9 @@ class LocalCodeApp(App):
                 self.partner.backend_model = arg
                 self.partner.preferred_backend_model = arg
             self._refresh_status()
+            return True
+        if cmd in {"/repo", "/explorer"}:
+            self._open_repository_explorer()
             return True
         if cmd == "/apply":
             if not self.partner.pending_plan:
@@ -334,6 +340,7 @@ class LocalCodeApp(App):
         report = getattr(self.partner, "last_report", None)
         if not report:
             return
+        self.repository_tree.ingest_report(report)
         if report.get("needs_approval"):
             model = build_review_model(self.partner)
             if model:
@@ -360,16 +367,29 @@ class LocalCodeApp(App):
 
     def _review_dismissed(self, action) -> None:
         if action == "apply":
+            self.repository_tree.apply_proposal()
             self.activity.write_event({"kind": "apply", "text": "Proposal accepted"})
             self.conversation.write_user("/apply")
             self._run_turn("", kind="apply")
         elif action == "reject":
             self.partner.pending_plan = None
+            self.repository_tree.clear_proposal()
             self.activity.write_event({"kind": "reject", "text": "Proposal rejected"})
             self.conversation.write_assistant("Proposal rejected.")
             self._refresh_status()
         else:
             self.input.focus()
+
+    def _open_repository_explorer(self, badge_filter=None) -> None:
+        self.repository_tree.build()
+        self.push_screen(RepositoryExplorerScreen(self.repository_tree, self.partner, badge_filter=badge_filter))
+
+    def _focus_repository_search(self) -> None:
+        self._open_repository_explorer()
+        self.call_later(lambda: self.screen.action_focus_search())
+
+    def _open_repository_badge_filter(self, badge) -> None:
+        self._open_repository_explorer(badge_filter=badge)
 
     # -- runtime task workers ------------------------------------------
     def schedule_runtime_task(self, task) -> bool:
