@@ -13,6 +13,7 @@ from rich.text import Text
 from local_code.hardware import detect_hardware
 from local_code.routing import resolve_model_routing
 from local_code.tui.repository import RepositoryBadge
+from local_code.tui.workspace_memory import DecisionFilter, DecisionStatus, DecisionType
 
 
 Callback = Callable[[object], None]
@@ -146,6 +147,10 @@ def build_commands() -> list[Command]:
     for scope in ("edit", "command"):
         for mode in ("ask", "allow", "deny"):
             add(id=f"permission.{scope}.{mode}", title=f"{scope.title()} permission → {mode.title()}", subtitle=f"Set {scope} permission to {mode}", category="Permissions", keywords=(scope, mode, "permission"), callback=set_permission(scope, mode))
+    add(id="memory.open", title="Open Decision Browser", subtitle="Browse structured workspace memory", category="Workspace Memory", keywords=("decision", "memory", "why"), callback=lambda app: app._open_decision_browser())
+    add(id="memory.pending", title="Show pending decisions", subtitle="Open Decision Browser filtered to pending records", category="Workspace Memory", keywords=("pending", "questions"), callback=lambda app: app._open_decision_browser(DecisionFilter(status=DecisionStatus.PENDING)))
+    add(id="memory.rejected", title="Show rejected proposals", subtitle="Open Decision Browser filtered to rejections", category="Workspace Memory", keywords=("reject", "proposal"), callback=lambda app: app._open_decision_browser(DecisionFilter(type=DecisionType.REJECTED)))
+    add(id="memory.assumptions", title="Show assumptions", subtitle="Open Decision Browser filtered to assumptions", category="Workspace Memory", keywords=("assumption",), callback=lambda app: app._open_decision_browser(DecisionFilter(type=DecisionType.ASSUMPTION)))
     add(id="repository.open", title="Open Repository Explorer", subtitle="Browse project structure and AI session footprint", category="Repository", keywords=("files", "tree", "explorer"), callback=lambda app: app._open_repository_explorer())
     add(id="repository.search", title="Focus search", subtitle="Open Repository Explorer with search focused", category="Repository", keywords=("find", "files"), callback=lambda app: app._focus_repository_search())
     add(id="repository.changed", title="Show changed files", subtitle="Filter Repository Explorer to AI-modified files", category="Repository", keywords=("edited", "modified"), callback=lambda app: app._open_repository_badge_filter(RepositoryBadge.EDITED))
