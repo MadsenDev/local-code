@@ -17,6 +17,7 @@ from .diff_review import build_review_model
 from .screens.command_palette import CommandPaletteScreen
 from .screens.confirm import ConfirmScreen
 from .screens.diff_review import DiffReviewScreen
+from .screens.decision_browser import DecisionBrowserScreen
 from .screens.repository_explorer import RepositoryExplorerScreen
 from .screens.runtime_results import BenchmarkResultsScreen, DoctorResultsScreen, RuntimeStatusScreen
 from .tasks import RuntimeTask, run_runtime_task, task_complete_message, task_progress_message, task_title
@@ -26,6 +27,7 @@ from .widgets.conversation import ConversationView
 from .widgets.input import InputBar
 from .widgets.runtime import RuntimePanel
 from .widgets.status import StatusBar, render_status_text
+from .workspace_memory import DecisionFilter, DecisionStatus, DecisionStore, DecisionType
 
 HELP = """\
 **Commands**
@@ -62,6 +64,7 @@ class LocalCodeApp(App):
         self._runtime_task_busy = False
         self._runtime_task_name = None
         self.commands = build_commands()
+        self.workspace_memory = DecisionStore()
         self.repository_tree = RepositoryTree(getattr(partner, "workdir", ".") or ".")
 
     def compose(self) -> ComposeResult:
@@ -269,9 +272,11 @@ class LocalCodeApp(App):
 
     def _write_event(self, event) -> None:
         self.activity.write_event(event)
+        self.workspace_memory.ingest_activity_event(event)
 
     def _confirm_result(self, kind, label, content) -> bool:
         # Called via call_from_thread; runs the modal and waits for dismissal.
+        self.call_from_thread(self._write_event, {"kind": "question", "title": f"Waiting for {kind.lower()} approval", "text": label})
         return bool(self.call_from_thread(self.push_screen_wait, ConfirmScreen(kind, label, content)))
 
     # -- the worker -----------------------------------------------------
@@ -346,7 +351,11 @@ class LocalCodeApp(App):
             if model:
                 self.conversation.write_assistant("Proposal ready. Opened review screen.")
                 self.activity.write_event({"kind": "milestone", "text": "Prepared code changes"})
+                self.workspace_memory.ingest_activity_event({"kind": "milestone", "text": "Prepared code changes"})
+                changed_files = [file.filename for file in model.files]
+                self.workspace_memory.add(type=DecisionType.PLAN, title="Review pending proposal", summary="Proposal generated and ready for diff review.", reason="The agent prepared code changes that require user approval.", status=DecisionStatus.PENDING, files=changed_files)
                 self.activity.write_event({"kind": "diff", "files": model.summary.files, "added": model.summary.added, "removed": model.summary.removed})
+                self.workspace_memory.ingest_activity_event({"kind": "diff", "files": model.summary.files, "added": model.summary.added, "removed": model.summary.removed})
                 self.call_later(self._open_review_screen)
         bits = []
         if report.get("files_changed"):
@@ -368,13 +377,16 @@ class LocalCodeApp(App):
     def _review_dismissed(self, action) -> None:
         if action == "apply":
             self.repository_tree.apply_proposal()
+            files = [file.filename for file in build_review_model(self.partner).files] if build_review_model(self.partner) else []
             self.activity.write_event({"kind": "apply", "text": "Proposal accepted"})
+            self.workspace_memory.ingest_activity_event({"kind": "apply", "text": "Proposal accepted", "files": files})
             self.conversation.write_user("/apply")
             self._run_turn("", kind="apply")
         elif action == "reject":
             self.partner.pending_plan = None
             self.repository_tree.clear_proposal()
             self.activity.write_event({"kind": "reject", "text": "Proposal rejected"})
+            self.workspace_memory.ingest_activity_event({"kind": "reject", "text": "Proposal rejected"})
             self.conversation.write_assistant("Proposal rejected.")
             self._refresh_status()
         else:
@@ -390,6 +402,19 @@ class LocalCodeApp(App):
 
     def _open_repository_badge_filter(self, badge) -> None:
         self._open_repository_explorer(badge_filter=badge)
+
+
+    def _open_decision_browser(self, initial: DecisionFilter | None = None) -> None:
+        self.push_screen(DecisionBrowserScreen(self.workspace_memory, self, initial=initial))
+
+    def open_repository_for_decision(self, decision) -> None:
+        self.repository_tree.build()
+        self.push_screen(RepositoryExplorerScreen(self.repository_tree, self.partner))
+
+    def jump_to_decision_conversation(self, decision) -> None:
+        anchor = decision.conversation_anchor or decision.title
+        self.conversation.log.write(Text(f"Decision context: {anchor}", style="cyan"))
+        self.conversation.log.scroll_end(animate=False)
 
     # -- runtime task workers ------------------------------------------
     def schedule_runtime_task(self, task) -> bool:
@@ -421,6 +446,7 @@ class LocalCodeApp(App):
         if error is not None:
             message = str(error) or type(error).__name__
             self.activity.write_event({"kind": "task_failed", "text": message})
+            self.workspace_memory.ingest_activity_event({"kind": "task_failed", "text": message})
             self.conversation.write_tool_summary(
                 Text(message + "\n\nTry Runtime status or Run doctor from Ctrl+K for more detail.", style="red"),
                 title="runtime task failed",
@@ -428,6 +454,7 @@ class LocalCodeApp(App):
             )
         else:
             self.activity.write_event({"kind": "task_complete", "text": task_complete_message(runtime_task)})
+            self.workspace_memory.ingest_activity_event({"kind": "task_complete", "text": task_complete_message(runtime_task)})
             if runtime_task in {RuntimeTask.START, RuntimeTask.STOP, RuntimeTask.RESTART, RuntimeTask.STATUS}:
                 self.push_screen(RuntimeStatusScreen(result.report))
             elif runtime_task == RuntimeTask.DOCTOR:

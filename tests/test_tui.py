@@ -427,3 +427,38 @@ def test_repository_pending_command_disabled_without_proposal(tmp_path):
     assert not any(c.id == "repository.proposed" for c in filter_commands(commands, "pending", app))
     app.partner.pending_plan = {"report": {"needs_approval": True}, "contract": {}, "original_prompt": "x"}
     assert any(c.id == "repository.proposed" for c in filter_commands(commands, "pending", app))
+
+
+def test_command_registry_contains_decision_browser_actions():
+    commands = build_commands()
+    ids = {command.id for command in commands}
+    assert "memory.open" in ids
+    assert "memory.pending" in ids
+    assert "memory.rejected" in ids
+    assert "memory.assumptions" in ids
+
+
+def test_activity_event_feeds_workspace_memory(tmp_path):
+    async def inner():
+        app = LocalCodeApp(_partner(tmp_path))
+        async with app.run_test() as pilot:
+            app._write_event({"kind": "apply", "text": "Proposal accepted", "files": ["README.md"]})
+            await pilot.pause()
+            records = app.workspace_memory.filter()
+            assert records[0].title == "Proposal accepted"
+            assert records[0].files == ("README.md",)
+
+    asyncio.run(inner())
+
+
+def test_decision_browser_opens_from_palette_command(tmp_path):
+    async def inner():
+        partner = _partner(tmp_path)
+        app = LocalCodeApp(partner)
+        command = next(c for c in app.commands if c.id == "memory.open")
+        async with app.run_test() as pilot:
+            app.execute_palette_command(command)
+            await pilot.pause()
+            assert app.screen_stack[-1].__class__.__name__ == "DecisionBrowserScreen"
+
+    asyncio.run(inner())

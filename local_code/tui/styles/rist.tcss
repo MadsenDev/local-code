@@ -313,3 +313,57 @@ RepositoryExplorerScreen {
     height: 1;
     color: #7f8b99;
 }
+
+DecisionBrowserScreen {
+    align: center middle;
+    background: #0f141980;
+}
+
+#decision-box {
+    width: 92%;
+    height: 86%;
+    padding: 1 2;
+    background: #151d26;
+    border: round #5e81ac;
+}
+
+#decision-title {
+    height: 1;
+    color: #8fbcbb;
+    text-style: bold;
+}
+
+#decision-filters {
+    height: 1;
+    margin-top: 1;
+}
+
+#decision-search {
+    height: 3;
+    margin: 1 0;
+    border: tall #263241;
+    background: #111820;
+}
+
+#decision-main {
+    height: 1fr;
+}
+
+#decision-list {
+    width: 2fr;
+    min-width: 40;
+    padding: 1;
+    border-right: solid #263241;
+    overflow-y: auto;
+}
+
+#decision-details {
+    width: 3fr;
+    padding: 1 2;
+    overflow: auto;
+}
+
+#decision-hint {
+    height: 1;
+    color: #7f8b99;
+}
