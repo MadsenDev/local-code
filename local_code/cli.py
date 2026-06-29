@@ -34,6 +34,8 @@ from .llama_runtime import (
     find_llama_server,
     install_llama_server,
     install_model,
+    managed_model_installed,
+    managed_runtime_installed,
     list_managed_models,
     log_path as managed_log_path,
     prepare_server_start,
@@ -1293,14 +1295,42 @@ def _select_auto_provider(args):
         return "ollama", ollama_base
     return "auto", None
 
+def _is_interactive_setup(args):
+    return sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
+
+
+def is_advanced_setup(args):
+    return bool(args.advanced or args.model_path or args.url or args.llama_server)
+
+
+def is_managed_setup(args):
+    return not is_advanced_setup(args)
+
+
+def _friendly_setup_error(exc):
+    text = str(exc)
+    lowered = text.lower()
+    if "sha-256 mismatch" in lowered or "checksum" in lowered:
+        return "Downloaded file could not be verified.\nThe file was discarded.\nRetry with `rist setup`."
+    if isinstance(exc, urllib.error.URLError) or "network" in lowered or "timed out" in lowered:
+        return "Unable to download required files.\nCheck your internet connection."
+    if "failed to start" in lowered or "failed to become healthy" in lowered:
+        return (
+            "Rist installed successfully,\nbut the local runtime could not be started.\n\n"
+            "Suggested commands:\n  rist runtime status\n  rist doctor\n  rist llama logs"
+        )
+    if "model" in lowered and ("download" in lowered or "gguf" in lowered):
+        return "Model installation did not complete.\nNothing was installed.\nRetry with `rist setup`."
+    return f"Setup failed: {text}"
+
+
 def _run_setup(args):
-    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
     try:
-        if interactive:
+        if _is_interactive_setup(args):
             return _run_setup_advanced(args) if args.advanced else _run_setup_interactive(args)
         return _run_setup_noninteractive(args)
     except Exception as exc:  # setup must not print tracebacks for recoverable failures
-        sys.stderr.write(f"Setup failed: {exc}\n")
+        sys.stderr.write(_friendly_setup_error(exc) + "\n")
         sys.stderr.write("Run `rist setup --advanced` for manual runtime, GGUF, Ollama, or external-server options.\n")
         return 1
 
@@ -1343,6 +1373,46 @@ def _managed_setup_plan(profile_id):
     return runtime_asset, model_asset
 
 
+def _progress_printer(label):
+    last = {"pct": -1, "bytes": 0}
+    def report(done, total):
+        last["bytes"] = done
+        if total:
+            pct = int(done * 100 / total)
+            if pct == last["pct"] and pct not in {0, 100}:
+                return
+            last["pct"] = pct
+            filled = min(20, max(0, int(pct / 5)))
+            bar = "█" * filled + "░" * (20 - filled)
+            print(f"\r{bar} {pct}%", end="", flush=True)
+        else:
+            print(f"\r⠋ {_format_bytes(done)} downloaded", end="", flush=True)
+    return report
+
+
+def _finish_progress():
+    print()
+
+
+def _start_runtime_with_retries(profile_id, gpu_profile, llama_server, args, *, retries=2):
+    last_exc = None
+    for attempt in range(retries + 1):
+        if attempt:
+            print("Still waiting for local runtime...")
+            print("Retrying...")
+        try:
+            return start_server(profile_id, gpu_profile, executable=llama_server, host=args.host, port=args.port, wait_timeout=args.wait_timeout)
+        except RuntimeError as exc:
+            last_exc = exc
+            if attempt >= retries:
+                raise
+            try:
+                stop_server()
+            except Exception:
+                pass
+    raise last_exc
+
+
 def _run_managed_setup(args, *, confirm=False):
     print("Welcome to Rist.\n")
     print("We'll set up your local AI coding assistant.\n")
@@ -1372,32 +1442,54 @@ def _run_managed_setup(args, *, confirm=False):
     home = rist_home(); home.mkdir(parents=True, exist_ok=True)
     print(f"✓ {home}")
     print("\nDownloading llama.cpp runtime...")
-    runtime = install_llama_server(force=args.force)
-    print("✓ SHA256 verified")
-    print("Installing llama-server...")
-    print("✓ Installed")
+    runtime = managed_runtime_installed(runtime_asset) if not args.force else None
+    if runtime:
+        print("✓ Runtime already installed")
+    else:
+        runtime = install_llama_server(force=args.force, progress=_progress_printer("runtime"))
+        _finish_progress()
+        print("✓ SHA256 verified")
+        print("Installing llama-server...")
+        print("✓ Installed")
     llama_server = runtime["executable"]
     config["llamacpp"]["llama_server"] = llama_server
     print("\nDownloading model...")
-    registered = install_model(profile_id, force=args.force)
-    print("✓ SHA256 verified")
-    print("Registering model...")
-    print(f"✓ {registered['profile'].replace('-llamacpp', '')}")
+    registered = managed_model_installed(profile_id, model_asset) if not args.force else None
+    if registered:
+        print("✓ Model already installed")
+    else:
+        registered = install_model(profile_id, force=args.force, progress=_progress_printer("model"))
+        _finish_progress()
+        print("✓ SHA256 verified")
+        print("Registering model...")
+        print(f"✓ {registered['profile'].replace('-llamacpp', '')}")
+    config_exists = (rist_home() / "config" / "runtime.json").exists()
     path = save_runtime_config(config)
-    print("\nStarting local runtime...")
-    started = start_server(profile_id, config['llamacpp']['gpu_profile'], executable=llama_server, host=args.host, port=args.port, wait_timeout=args.wait_timeout)
+    print("✓ Configuration already exists" if config_exists else "✓ Configuration saved")
+    print("\nChecking runtime...")
+    print("Starting runtime...")
+    started = _start_runtime_with_retries(profile_id, config['llamacpp']['gpu_profile'], llama_server, args)
     print("✓ llama-server started")
+    print("✓ Ready")
     print(f"✓ {started.get('base_url') or config['llamacpp']['base_url']}")
     print("\nRunning diagnostics...\n")
     provider = build_provider("llamacpp", base_url=started.get("base_url") or config["llamacpp"]["base_url"])
     print(_concise_doctor(doctor_report(provider, "local", "local", settings["context"])))
-    print("\nSetup complete.\n")
-    print("Run:\n\n    rist")
+    endpoint = started.get("base_url") or config["llamacpp"]["base_url"]
+    print("\n" + "-" * 50)
+    print("Setup complete\n")
+    print("Runtime\n✓ Installed\n")
+    print(f"Model\n✓ {model_asset['display_name']}\n")
+    print("Status\n✓ Running\n")
+    print(f"Endpoint\n{endpoint}\n")
+    print(f"Configuration\n{rist_home()}\n")
+    print("Next\nRun:\n\n    rist\n\nEnjoy.")
+    print("-" * 50)
     return 0
 
 
 def _run_setup_noninteractive(args):
-    if not (args.advanced or args.model_path or args.url or args.llama_server or args.start is False and (args.model_path or args.url)):
+    if is_managed_setup(args):
         return _run_managed_setup(args, confirm=False)
     hardware, recs, recommended_profile, settings, llama_server, config = _base_setup(args)
     profile_id = config["llamacpp"]["profile"]
