@@ -138,6 +138,7 @@ def parse_args():
     parser.add_argument("--dry-run", action="store_true", help="Resolve and print model start details without launching a process")
     parser.add_argument("--delete-file", action="store_true", help="Delete a registered GGUF when removing a model")
     parser.add_argument("--yes", action="store_true", help="Run setup non-interactively and confirm destructive model file deletion")
+    parser.add_argument("--advanced", action="store_true", help="Show advanced setup options instead of the managed default flow")
     parser.add_argument("--tail", type=int, default=100, help="Number of managed llama.cpp log lines to show (100)")
     parser.add_argument("--follow", action="store_true", help="Continue streaming appended managed llama.cpp log output")
     parser.add_argument("--llama-server", dest="llama_server", default=None, help="Path to the external llama-server executable")
@@ -1294,9 +1295,14 @@ def _select_auto_provider(args):
 
 def _run_setup(args):
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.yes
-    if interactive:
-        return _run_setup_interactive(args)
-    return _run_setup_noninteractive(args)
+    try:
+        if interactive:
+            return _run_setup_advanced(args) if args.advanced else _run_setup_interactive(args)
+        return _run_setup_noninteractive(args)
+    except Exception as exc:  # setup must not print tracebacks for recoverable failures
+        sys.stderr.write(f"Setup failed: {exc}\n")
+        sys.stderr.write("Run `rist setup --advanced` for manual runtime, GGUF, Ollama, or external-server options.\n")
+        return 1
 
 
 def _base_setup(args, *, profile_id=None, gpu_profile=None, llama_server=None):
@@ -1322,7 +1328,77 @@ def _base_setup(args, *, profile_id=None, gpu_profile=None, llama_server=None):
     return hardware, recs, recommended_profile, settings, llama_server, config
 
 
+def _format_bytes(size):
+    units = ["B", "KB", "MB", "GB", "TB"]
+    value = float(size or 0)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+
+
+def _managed_setup_plan(profile_id):
+    runtime_asset = select_asset("runtime", "llama.cpp")
+    model_asset = select_asset("model", profile_id)
+    return runtime_asset, model_asset
+
+
+def _run_managed_setup(args, *, confirm=False):
+    print("Welcome to Rist.\n")
+    print("We'll set up your local AI coding assistant.\n")
+    print("Checking your system...\n")
+    hardware, recs, recommended_profile, settings, _llama_server, config = _base_setup(args, llama_server=None)
+    profile_id = config["llamacpp"]["profile"]
+    runtime_asset, model_asset = _managed_setup_plan(profile_id)
+    for line in _format_hardware(hardware):
+        print(f"✓ {line}")
+    print("\nRecommended setup\n")
+    print("Runtime:")
+    print(f"  {runtime_asset['display_name']} managed runtime")
+    print("\nModel:")
+    print(f"  {model_asset['display_name']}")
+    vram = hardware.max_vram_gb
+    print(f"  Best fit for your {vram:g} GB GPU" if vram else "  Best fit for your system")
+    total = runtime_asset["size"] + model_asset["size"]
+    print("\nInstall size:")
+    print(f"  Runtime: {_format_bytes(runtime_asset['size'])}")
+    print(f"  Model:   {_format_bytes(model_asset['size'])}")
+    print(f"  Total:   {_format_bytes(total)}\n")
+    if confirm and not _prompt_yes_no("Install and start Rist local AI?", True):
+        print("Setup cancelled.")
+        return 0
+
+    print("Creating Rist data directory...\n")
+    home = rist_home(); home.mkdir(parents=True, exist_ok=True)
+    print(f"✓ {home}")
+    print("\nDownloading llama.cpp runtime...")
+    runtime = install_llama_server(force=args.force)
+    print("✓ SHA256 verified")
+    print("Installing llama-server...")
+    print("✓ Installed")
+    llama_server = runtime["executable"]
+    config["llamacpp"]["llama_server"] = llama_server
+    print("\nDownloading model...")
+    registered = install_model(profile_id, force=args.force)
+    print("✓ SHA256 verified")
+    print("Registering model...")
+    print(f"✓ {registered['profile'].replace('-llamacpp', '')}")
+    path = save_runtime_config(config)
+    print("\nStarting local runtime...")
+    started = start_server(profile_id, config['llamacpp']['gpu_profile'], executable=llama_server, host=args.host, port=args.port, wait_timeout=args.wait_timeout)
+    print("✓ llama-server started")
+    print(f"✓ {started.get('base_url') or config['llamacpp']['base_url']}")
+    print("\nRunning diagnostics...\n")
+    provider = build_provider("llamacpp", base_url=started.get("base_url") or config["llamacpp"]["base_url"])
+    print(_concise_doctor(doctor_report(provider, "local", "local", settings["context"])))
+    print("\nSetup complete.\n")
+    print("Run:\n\n    rist")
+    return 0
+
+
 def _run_setup_noninteractive(args):
+    if not (args.advanced or args.model_path or args.url or args.llama_server or args.start is False and (args.model_path or args.url)):
+        return _run_managed_setup(args, confirm=False)
     hardware, recs, recommended_profile, settings, llama_server, config = _base_setup(args)
     profile_id = config["llamacpp"]["profile"]
     registered = None
@@ -1338,99 +1414,72 @@ def _run_setup_noninteractive(args):
         print(line)
     print(f"Recommended llama.cpp profile: {profile_id}")
     print(f"Recommended GPU profile: {config['llamacpp']['gpu_profile']}")
-    print("llama-server:", llama_server or "not found; install llama.cpp, pass --llama-server, or set LLAMA_SERVER")
+    print("llama-server:", llama_server or "not found; run `rist setup` for managed install or `rist setup --advanced`")
     if registered:
         print(f"Registered model: {registered['profile']} -> {registered['path']}")
     print(f"Saved config: {path}")
-    started = None
     if args.start:
         if not _managed_model_ready(profile_id):
-            print("Start skipped: no registered GGUF for the selected profile. Pass --model-path or run `rist model register`.")
+            print("Start skipped: no registered model. Run `rist setup` for managed install or use `rist setup --advanced`.")
         elif not llama_server:
-            print("Start skipped: llama-server was not found. Pass --llama-server or set LLAMA_SERVER.")
+            print("Start skipped: llama-server was not found. Run `rist setup` for managed install or pass --llama-server.")
         else:
             started = start_server(profile_id, config['llamacpp']['gpu_profile'], executable=llama_server, host=args.host, port=args.port, wait_timeout=args.wait_timeout)
             _print_runtime_report(started, args.json_output)
             provider = build_provider("llamacpp", base_url=started.get("base_url") or config["llamacpp"]["base_url"])
             report = doctor_report(provider, "local", "local", settings["context"])
             print(to_json(report) if args.json_output else _concise_doctor(report))
-            if args.benchmark:
-                report = benchmark_model(provider, "local", runs=args.benchmark_runs, num_ctx=settings["context"], long_context=args.long_context)
-                print(to_json(report) if args.json_output else format_benchmark(report))
     print("Setup complete.")
-    print("Run:\n\n    rist\n\nto begin.")
+    print("Run:\n\n    rist")
     return 0
 
 
 def _run_setup_interactive(args):
-    print("Welcome to Rist.\n")
-    print("We'll configure your local AI runtime.\n")
-    hardware, recs, recommended_profile, settings, llama_server, config = _base_setup(args)
-    print("Detected hardware:")
-    for line in _format_hardware(hardware):
-        print(f"  {line}")
-    print(f"\nDetected profile: {config['llamacpp']['gpu_profile']}")
-    print("\nRecommended model:")
-    options = []
-    for i, profile in enumerate(recs[:3] or [{"id": recommended_profile+'-llamacpp', "name": recommended_profile}], 1):
-        pid = profile["id"].replace("-llamacpp", "")
-        options.append(pid)
-        print(f"  {'✓' if pid == recommended_profile else '○'} {i}. {profile['name']}")
-    choice = _prompt_choice("Choose model profile", {str(i) for i in range(1, len(options)+1)}, "1")
-    profile_id = options[int(choice)-1]
-    config["llamacpp"]["profile"] = profile_id
-    llama_server = find_llama_server(args.llama_server)
-    print("\nLocate llama-server.")
-    if llama_server:
-        print(f"✓ Found llama-server\n{llama_server}")
-        config["llamacpp"]["llama_server"] = llama_server
-    else:
-        print("llama-server was not found.")
-        print("- install upstream")
-        print("- use LLAMA_SERVER")
-        print("- pass --llama-server")
-    print("\nModel setup:")
-    print("1. Register existing GGUF")
-    print("2. Install GGUF from explicit URL + SHA256")
-    print("3. Skip for now")
-    action = _prompt_choice("Choose", {"1", "2", "3"}, "1")
-    registered = None
+    return _run_managed_setup(args, confirm=True)
+
+
+def _run_setup_advanced(args):
+    print("Advanced setup\n")
+    print("How do you want to run local AI?\n")
+    print("1. Managed llama.cpp runtime and recommended model")
+    print("2. Use existing GGUF file")
+    print("3. Use existing llama-server binary")
+    print("4. Connect to already-running llama.cpp server")
+    print("5. Use Ollama")
+    print("6. Skip local setup")
+    action = _prompt_choice("Choose", {"1", "2", "3", "4", "5", "6"}, "1")
     if action == "1":
+        return _run_managed_setup(args, confirm=True)
+    hardware, recs, recommended_profile, settings, llama_server, config = _base_setup(args)
+    profile_id = config["llamacpp"]["profile"]
+    if action == "2":
         path = input("Path to GGUF: ").strip()
         registered = register_model(profile_id, path)
         print(f"Registered model: {registered['path']}")
-    elif action == "2":
-        url = input("GGUF URL: ").strip()
-        sha = input("SHA256: ").strip()
-        if not sha:
-            raise ValueError("Installing a GGUF from URL requires SHA256.")
-        registered = install_model(profile_id, url, filename=args.filename, sha256=sha, force=args.force)
-        print(f"Installed model: {registered['path']}")
+    elif action == "3":
+        path = input("Path to llama-server: ").strip()
+        if not path:
+            raise ValueError("A llama-server path is required.")
+        config["llamacpp"]["llama_server"] = str(Path(path).expanduser())
+    elif action == "4":
+        base_url = input("llama.cpp server base URL [http://127.0.0.1:8080/v1]: ").strip() or DEFAULT_LLAMACPP_BASE_URL
+        config["provider"] = "llamacpp"; config["llamacpp"]["base_url"] = base_url
+    elif action == "5":
+        config["provider"] = "ollama"; config["default_runtime"] = "ollama"
+    else:
+        print("Local setup skipped.")
+        return 0
     path = save_runtime_config(config)
     print(f"Saved config: {path}")
-    started = None
-    if llama_server and registered and _prompt_yes_no("Start managed runtime now?", True):
-        try:
-            started = start_server(profile_id, config['llamacpp']['gpu_profile'], executable=llama_server, host=args.host, port=args.port, wait_timeout=args.wait_timeout)
-            provider = build_provider("llamacpp", base_url=started.get("base_url") or config["llamacpp"]["base_url"])
-            report = doctor_report(provider, "local", "local", settings["context"])
-            print(_concise_doctor(report))
-            if _prompt_yes_no("Run a quick benchmark?", False):
-                bench = benchmark_model(provider, "local", runs=args.benchmark_runs, num_ctx=settings["context"], long_context=args.long_context)
-                print(format_benchmark(bench))
-        except Exception as exc:  # noqa: BLE001
-            print(f"Startup failed: {exc}")
-            provider = build_provider("llamacpp", base_url=config["llamacpp"]["base_url"])
-            print(format_doctor(doctor_report(provider, "local", "local", settings["context"])))
-    print("\nSetup complete.\n")
-    print("Run:\n\n    rist\n\nto begin.")
+    print("Setup complete.")
+    print("Run:\n\n    rist")
     return 0
 
 def _print_setup_guidance():
     class _Args:
         profile = None; gpu = None; model_path = None; llama_server = None; host = "127.0.0.1"; port = 8080
         start = False; benchmark = False; benchmark_runs = 3; long_context = False; wait_timeout = 120; json_output = False
-        url = None; sha256 = None; filename = None; force = False; yes = True
+        url = None; sha256 = None; filename = None; force = False; yes = True; advanced = False
     return _run_setup(_Args())
 
 def _run_llama_tune(args):
