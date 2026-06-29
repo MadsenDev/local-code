@@ -3,14 +3,15 @@
 from textual.widgets import Static
 
 
-def render_status_text(partner, busy: bool) -> str:
+def render_status_text(partner, busy: bool, runtime_task: str | None = None) -> str:
     """Build the structured status line without requiring a mounted widget."""
 
     models = partner.frontend_model if partner.frontend_model == partner.backend_model else f"{partner.frontend_model}→{partner.backend_model}"
     pending = "Pending Review" if partner.pending_plan else "clear"
     state = "busy" if busy else "idle"
+    runtime_state = f"runtime task running: {runtime_task}" if runtime_task else "runtime idle"
     return (
-        f"[b]{partner.provider.name}[/b] | {models} | {state} | mode {partner.mode} | "
+        f"[b]{partner.provider.name}[/b] | {models} | {state} | {runtime_state} | mode {partner.mode} | "
         f"routing {partner.routing_decision.get('mode', partner.model_routing)} | "
         f"permissions e:{partner.edit_permission}/c:{partner.command_permission} | plan:{pending}"
     )
@@ -19,8 +20,8 @@ def render_status_text(partner, busy: bool) -> str:
 class StatusBar(Static):
     """One-line structured runtime status."""
 
-    def render_status(self, partner, busy: bool) -> str:
-        return render_status_text(partner, busy)
+    def render_status(self, partner, busy: bool, runtime_task: str | None = None) -> str:
+        return render_status_text(partner, busy, runtime_task)
 
-    def refresh_from(self, partner, busy: bool = False) -> None:
-        self.update(self.render_status(partner, busy))
+    def refresh_from(self, partner, busy: bool = False, runtime_task: str | None = None) -> None:
+        self.update(self.render_status(partner, busy, runtime_task))

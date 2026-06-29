@@ -17,6 +17,8 @@ from .diff_review import build_review_model
 from .screens.command_palette import CommandPaletteScreen
 from .screens.confirm import ConfirmScreen
 from .screens.diff_review import DiffReviewScreen
+from .screens.runtime_results import BenchmarkResultsScreen, DoctorResultsScreen, RuntimeStatusScreen
+from .tasks import RuntimeTask, run_runtime_task, task_complete_message, task_progress_message, task_title
 from .widgets.activity import ActivityTimeline
 from .widgets.conversation import ConversationView
 from .widgets.input import InputBar
@@ -55,6 +57,8 @@ class LocalCodeApp(App):
         self.partner = partner
         self._live_text = ""
         self._busy = False
+        self._runtime_task_busy = False
+        self._runtime_task_name = None
         self.commands = build_commands()
 
     def compose(self) -> ComposeResult:
@@ -96,10 +100,10 @@ class LocalCodeApp(App):
         self.input.focus()
 
     def _status_text(self) -> str:
-        return render_status_text(self.partner, self._busy)
+        return render_status_text(self.partner, self._busy, self._runtime_task_name if self._runtime_task_busy else None)
 
     def _refresh_status(self) -> None:
-        self.status.refresh_from(self.partner, self._busy)
+        self.status.refresh_from(self.partner, self._busy, self._runtime_task_name if self._runtime_task_busy else None)
         self.runtime_panel.refresh_from(self.partner)
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -366,6 +370,55 @@ class LocalCodeApp(App):
             self._refresh_status()
         else:
             self.input.focus()
+
+    # -- runtime task workers ------------------------------------------
+    def schedule_runtime_task(self, task) -> bool:
+        runtime_task = RuntimeTask(task)
+        if self._runtime_task_busy:
+            self.activity.write_event({"kind": "task_failed", "text": "Another runtime task is already running."})
+            self.conversation.write_tool_summary(Text("A runtime task is already running. Wait for it to finish before starting another.", style="yellow"), title="runtime task", style="yellow")
+            return False
+        self._runtime_task_busy = True
+        self._runtime_task_name = task_title(runtime_task)
+        self.commands = build_commands()
+        self.activity.write_event({"kind": "task", "text": task_progress_message(runtime_task)})
+        self._refresh_status()
+        self.input.focus()
+        self._process_runtime_task(runtime_task)
+        return True
+
+    @work(thread=True, exclusive=True, group="runtime")
+    def _process_runtime_task(self, task) -> None:
+        try:
+            result = run_runtime_task(task, self.partner)
+        except Exception as exc:  # noqa: BLE001
+            self.call_from_thread(self._finish_runtime_task, task, None, exc)
+            return
+        self.call_from_thread(self._finish_runtime_task, task, result, None)
+
+    def _finish_runtime_task(self, task, result, error) -> None:
+        runtime_task = RuntimeTask(task)
+        if error is not None:
+            message = str(error) or type(error).__name__
+            self.activity.write_event({"kind": "task_failed", "text": message})
+            self.conversation.write_tool_summary(
+                Text(message + "\n\nTry Runtime status or Run doctor from Ctrl+K for more detail.", style="red"),
+                title="runtime task failed",
+                style="red",
+            )
+        else:
+            self.activity.write_event({"kind": "task_complete", "text": task_complete_message(runtime_task)})
+            if runtime_task in {RuntimeTask.START, RuntimeTask.STOP, RuntimeTask.RESTART, RuntimeTask.STATUS}:
+                self.push_screen(RuntimeStatusScreen(result.report))
+            elif runtime_task == RuntimeTask.DOCTOR:
+                self.push_screen(DoctorResultsScreen(result.report))
+            elif runtime_task == RuntimeTask.BENCHMARK:
+                self.push_screen(BenchmarkResultsScreen(result.report))
+        self._runtime_task_busy = False
+        self._runtime_task_name = None
+        self.commands = build_commands()
+        self._refresh_status()
+        self.input.focus()
 
     # -- actions --------------------------------------------------------
     def action_open_palette(self) -> None:

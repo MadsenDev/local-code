@@ -113,6 +113,18 @@ rist --tool-calling auto    # try native tools, then fall back to JSON
 
 Model routing is separate from interaction mode. `adaptive` is the default and only keeps separate frontend/backend models when hardware estimates indicate that both can stay resident. `single` shares one model, while `dual` honors separate role models regardless of estimated reload cost.
 
+## TUI roadmap
+
+Rist TUI v2 roadmap:
+
+| Version | Scope | Status |
+| --- | --- | --- |
+| v2.3 | Async runtime tasks plus dedicated runtime, doctor, and benchmark result screens | Implemented |
+| v2.4 | Repository explorer | Planned |
+| v2.5 | Decision browser | Planned |
+| v2.6 | Settings screen | Planned |
+| v2.7 | Real measured llama.cpp tuning workflow | Planned |
+
 ## TUI
 
 Rist opens a full-screen Textual interface by default:
@@ -121,11 +133,14 @@ Rist opens a full-screen Textual interface by default:
 - **Live token streaming** of the answer as it's generated.
 - **Tool-activity cards** — every repo read, search, command, and edit (with +/− counts) shows up as it happens.
 - **Approval modals** — in execute mode, edits and commands pop a y/n confirmation.
-- A status bar (provider · models · mode · permissions · pending proposal) and slash commands.
+- A status bar (provider · models · assistant busy state · runtime task state · permissions · pending proposal) and slash commands.
+- Ctrl+K opens the command palette for runtime, model, routing, permission, proposal, and session actions.
+- Runtime management, doctor, and benchmark palette actions run asynchronously so the cockpit remains readable while work is in progress.
+- Runtime status, doctor, and benchmark results open in dedicated TUI views instead of being mixed into the command palette.
 
 Slash commands inside the TUI: `/help`, `/status`, `/models`, `/mode`, `/model`,
 `/frontend`, `/backend`, `/ask`, `/plan`, `/apply`, `/agent`, `/clear`, `/quit`.
-Keys: Enter to send, Ctrl+L to clear, Ctrl+C to quit. Use `--no-tui` for the
+Keys: Enter to send, Ctrl+K to open the command palette, Ctrl+L to clear, Ctrl+C to quit. Use `--no-tui` for the
 plain REPL (also used automatically when piping or when Textual isn't installed).
 
 ## Providers

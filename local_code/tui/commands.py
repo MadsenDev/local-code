@@ -10,10 +10,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.text import Text
 
-from local_code.config import load_runtime_config
-from local_code.diagnostics import benchmark_model, doctor_report, format_benchmark, format_doctor
 from local_code.hardware import detect_hardware
-from local_code.llama_runtime import server_status, start_server, stop_server
 from local_code.routing import resolve_model_routing
 
 
@@ -82,9 +79,6 @@ def build_commands() -> list[Command]:
     def add(**kwargs):
         commands.append(Command(**kwargs))
 
-    def write_panel(app, body, title):
-        app.conversation.log.write(Panel(Text(str(body)), title=title, border_style="cyan"))
-
     def set_mode(mode: str):
         def callback(app):
             app.partner.mode = mode
@@ -115,26 +109,8 @@ def build_commands() -> list[Command]:
             app._refresh_status()
         return callback
 
-    def start_runtime(app):
-        cfg = load_runtime_config().get("llamacpp", {})
-        report = start_server(cfg.get("profile", "qwen2.5-coder-7b"), cfg.get("gpu_profile", "cpu"), port=int(cfg.get("port", 8080)))
-        write_panel(app, f"Managed runtime started: {report.get('base_url', '')}", "runtime")
-
-    def stop_runtime(app):
-        write_panel(app, stop_server().get("message", "Managed runtime stopped."), "runtime")
-
-    def restart_runtime(app):
-        stop_server()
-        start_runtime(app)
-
-    def runtime_status(app):
-        write_panel(app, server_status(), "runtime status")
-
-    def run_doctor(app):
-        write_panel(app, format_doctor(doctor_report(app.partner.provider, app.partner.frontend_model, app.partner.backend_model, app.partner.context_limit)), "doctor")
-
-    def run_benchmark(app):
-        write_panel(app, format_benchmark(benchmark_model(app.partner.provider, app.partner.backend_model, num_ctx=app.partner.context_limit)), "benchmark")
+    def schedule_runtime(task: str):
+        return lambda app: app.schedule_runtime_task(task)
 
     def has_pending(app):
         return bool(getattr(app.partner, "pending_plan", None))
@@ -150,8 +126,16 @@ def build_commands() -> list[Command]:
     add(id="conversation.copy_last", title="Copy last response", subtitle="Copy the latest assistant response", category="Conversation", keywords=("clipboard",), callback=lambda app: app._copy_last_response())
     add(id="conversation.help", title="Show help", subtitle="Show available slash commands and keys", category="Conversation", keywords=("docs",), callback=lambda app: app.conversation.log.write(Panel(Markdown(app.HELP_TEXT), title="help", border_style="cyan")))
 
-    for title, cb, kws in [("Start managed runtime", start_runtime, ("llama",)), ("Stop managed runtime", stop_runtime, ("llama",)), ("Restart managed runtime", restart_runtime, ("llama",)), ("Runtime status", runtime_status, ("health",)), ("Run doctor", run_doctor, ("diagnostics",)), ("Run benchmark", run_benchmark, ("bench", "performance"))]:
-        add(id="runtime." + title.lower().replace(" ", "_"), title=title, subtitle="Manage or inspect the local runtime", category="Runtime", keywords=kws, callback=cb)
+    for title, task, kws in [("Start managed runtime", "start", ("llama",)), ("Stop managed runtime", "stop", ("llama",)), ("Restart managed runtime", "restart", ("llama",)), ("Runtime status", "status", ("health",)), ("Run doctor", "doctor", ("diagnostics",)), ("Run benchmark", "benchmark", ("bench", "performance"))]:
+        add(
+            id="runtime." + title.lower().replace(" ", "_"),
+            title=title,
+            subtitle="Manage or inspect the local runtime",
+            category="Runtime",
+            keywords=kws,
+            callback=schedule_runtime(task),
+            enabled=lambda app: not getattr(app, "_runtime_task_busy", False),
+        )
 
     add(id="models.show", title="Show current models", subtitle="Display provider and model details", category="Models", keywords=("model",), callback=lambda app: app._write_models())
     for mode in ("chat", "hybrid", "agent"):

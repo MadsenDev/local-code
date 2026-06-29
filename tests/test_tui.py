@@ -160,10 +160,10 @@ def test_palette_mode_switching_updates_status(tmp_path):
 
 def test_runtime_command_wiring_uses_existing_status_api(tmp_path, monkeypatch):
     async def inner():
-        import local_code.tui.commands as command_module
+        import local_code.tui.tasks as task_module
 
         calls = []
-        monkeypatch.setattr(command_module, "server_status", lambda: calls.append("status") or {"state": "stopped", "managed": False})
+        monkeypatch.setattr(task_module, "server_status", lambda: calls.append("status") or {"state": "stopped", "managed": False})
         partner = _partner(tmp_path)
         app = LocalCodeApp(partner)
         command = next(c for c in app.commands if c.id == "runtime.runtime_status")
@@ -257,3 +257,97 @@ def test_review_apply_and_reject_paths_update_activity_and_status(tmp_path):
             assert "plan:clear" in app.status.render_status(partner, False)
 
     asyncio.run(inner())
+
+
+def test_benchmark_rating_helper_uses_measured_summary():
+    from local_code.tui.tasks import benchmark_rating
+
+    assert benchmark_rating({"summary": {"median_tokens_per_second": 25, "median_ttft_s": 1, "median_elapsed_s": 4}}) == "Excellent"
+    assert benchmark_rating({"summary": {"median_tokens_per_second": 10, "median_ttft_s": 3, "median_elapsed_s": 8}}) == "Good"
+    assert benchmark_rating({"summary": {"median_tokens_per_second": 3, "median_elapsed_s": 20}}) == "Needs tuning"
+    assert benchmark_rating({"summary": {"median_tokens_per_second": 0.5, "median_elapsed_s": 40}}) == "Poor"
+
+
+def test_runtime_task_abstraction_status_uses_existing_api(tmp_path, monkeypatch):
+    import local_code.tui.tasks as task_module
+    from local_code.tui.tasks import RuntimeTask, run_runtime_task
+
+    monkeypatch.setattr(task_module, "server_status", lambda: {"state": "running", "pid": 123})
+    result = run_runtime_task(RuntimeTask.STATUS, _partner(tmp_path))
+    assert result.task == RuntimeTask.STATUS
+    assert result.report["state"] == "running"
+    assert result.report["pid"] == 123
+
+
+def test_runtime_command_schedules_task_instead_of_calling_status_directly(tmp_path, monkeypatch):
+    async def inner():
+        import local_code.tui.tasks as task_module
+
+        calls = []
+        monkeypatch.setattr(task_module, "server_status", lambda: calls.append("status") or {"state": "stopped"})
+        partner = _partner(tmp_path)
+        app = LocalCodeApp(partner)
+        command = next(c for c in app.commands if c.id == "runtime.runtime_status")
+        async with app.run_test() as pilot:
+            app.execute_palette_command(command)
+            assert app._runtime_task_busy is True
+            await pilot.pause(0.2)
+            assert calls == ["status"]
+            assert app._runtime_task_busy is False
+
+    asyncio.run(inner())
+
+
+def test_runtime_duplicate_task_prevention(tmp_path):
+    async def inner():
+        partner = _partner(tmp_path)
+        app = LocalCodeApp(partner)
+        async with app.run_test() as pilot:
+            app._runtime_task_busy = True
+            assert app.schedule_runtime_task("status") is False
+            await pilot.pause()
+            assert "TASK FAILED" in "".join(strip.text for strip in app.query_one("#activity-log").lines)
+
+    asyncio.run(inner())
+
+
+def test_runtime_task_failure_records_activity(tmp_path, monkeypatch):
+    async def inner():
+        import local_code.tui.app as app_module
+
+        def boom(task, partner):
+            raise RuntimeError("runtime exploded")
+
+        monkeypatch.setattr(app_module, "run_runtime_task", boom)
+        app = LocalCodeApp(_partner(tmp_path))
+        async with app.run_test() as pilot:
+            assert app.schedule_runtime_task("status") is True
+            await pilot.pause(0.2)
+            text = "".join(strip.text for strip in app.query_one("#activity-log").lines)
+            assert "TASK FAILED" in text
+            assert "runtime exploded" in text
+            assert app._runtime_task_busy is False
+
+    asyncio.run(inner())
+
+
+def test_doctor_results_helper_structures_errors():
+    from local_code.tui.screens.runtime_results import doctor_results_table
+
+    table = doctor_results_table({
+        "provider_available": False,
+        "models_endpoint": False,
+        "chat_completions": False,
+        "chat_error": "connection refused",
+        "configuration": {"provider": "llamacpp"},
+    })
+    assert table.row_count == 7
+
+
+def test_runtime_status_screen_data_rendering_helper():
+    from local_code.tui.screens.runtime_results import runtime_next_action, runtime_status_table
+
+    report = {"state": "running", "pid": 42, "pid_running": True, "base_url": "http://127.0.0.1:8080", "log_path": "/tmp/log"}
+    table = runtime_status_table(report)
+    assert table.row_count == 8
+    assert runtime_next_action(report) == "Run doctor or benchmark from Ctrl+K."
