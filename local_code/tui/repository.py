@@ -6,6 +6,31 @@ from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from enum import Enum
 from pathlib import Path
+from typing import Final
+
+
+IGNORED_DIRECTORY_NAMES: Final[set[str]] = {
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".next",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pycache__",
+    "build",
+    "coverage",
+    "dist",
+    "htmlcov",
+    "node_modules",
+    "target",
+    "vendor",
+    "venv",
+}
+
+_BINARY_SAMPLE_SIZE: Final[int] = 4096
 
 
 class RepositoryBadge(str, Enum):
@@ -97,11 +122,11 @@ class RepositoryTree:
             except OSError:
                 return []
             for entry in entries:
-                if entry.name in {".git", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}:
+                is_dir = entry.is_dir()
+                if is_dir and entry.name in IGNORED_DIRECTORY_NAMES:
                     continue
                 count += 1
                 child_rel = f"{rel}/{entry.name}" if rel else entry.name
-                is_dir = entry.is_dir()
                 node = RepositoryNode(entry.name, child_rel, is_dir)
                 if is_dir:
                     node.children = walk(entry, child_rel, depth + 1)
@@ -199,10 +224,18 @@ class RepositoryTree:
         if not target.is_file():
             return "Directory. Press Enter to expand or collapse."
         try:
-            data = target.read_text(errors="replace").splitlines()
+            if _looks_binary(target):
+                return "Binary file preview is not available."
+            lines: list[str] = []
+            with target.open("r", encoding="utf-8", errors="replace") as handle:
+                for _ in range(max(limit, 0)):
+                    line = handle.readline()
+                    if not line:
+                        break
+                    lines.append(line.rstrip("\r\n"))
         except OSError as exc:
             return f"Unable to load preview: {exc}"
-        return "\n".join(data[:limit]) or "Empty file."
+        return "\n".join(lines) or "Empty file."
 
     def _state(self, path: str) -> SessionFileState:
         clean = path.replace("\\", "/").lstrip("./")
@@ -235,3 +268,12 @@ def _fuzzy(query: str, text: str) -> float:
             return 0.0
         hits += 1
     return (hits / max(len(query), 1) + SequenceMatcher(None, query, text).ratio()) / 2
+
+
+def _looks_binary(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            sample = handle.read(_BINARY_SAMPLE_SIZE)
+    except OSError:
+        raise
+    return b"\0" in sample

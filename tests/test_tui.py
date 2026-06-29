@@ -371,6 +371,24 @@ def test_repository_tree_build_badges_search_selection_and_preview(tmp_path):
     assert "print('hi')" in tree.preview("src/app.py", limit=1)
 
 
+def test_repository_tree_ignores_generated_directories_and_handles_previews(tmp_path):
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "package.js").write_text("ignored\n")
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "bundle.js").write_text("ignored\n")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "app.py").write_text("one\ntwo\nthree\n")
+    (tmp_path / "image.bin").write_bytes(b"\x00PNG\r\n")
+
+    tree = RepositoryTree(tmp_path)
+    tree.build()
+
+    assert tree.root.find("node_modules") is None
+    assert tree.root.find("dist") is None
+    assert tree.preview("src/app.py", limit=2) == "one\ntwo"
+    assert tree.preview("image.bin") == "Binary file preview is not available."
+
+
 def test_repository_proposal_badges_apply_and_clear(tmp_path):
     (tmp_path / "a.py").write_text("a\n")
     tree = RepositoryTree(tmp_path)
